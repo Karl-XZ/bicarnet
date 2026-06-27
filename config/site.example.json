@@ -1,0 +1,36 @@
+{
+  "server": {
+    "name": "dualnet-server",
+    "publicEndpoint": "YOUR_PUBLIC_IP_OR_DOMAIN",
+    "lanEndpoint": "192.168.0.104",
+    "listenPort": 51820,
+    "statusApiPort": 8787,
+    "tunnelAddress": "10.77.0.1/24",
+    "dns": "1.1.1.1",
+    "allowClientToClient": true,
+    "enableServerAsInternetExit": true
+  },
+  "clients": [
+    {
+      "name": "domestic-linux",
+      "account": "domestic-server",
+      "address": "10.77.0.2/32",
+      "allowedIps": "10.77.0.0/24",
+      "persistentKeepalive": 25
+    },
+    {
+      "name": "dualnet-client-windows",
+      "account": "windows-user",
+      "address": "10.77.0.10/32",
+      "allowedIps": "10.77.0.0/24",
+      "persistentKeepalive": 25
+    },
+    {
+      "name": "dualnet-client-android",
+      "account": "android-user",
+      "address": "10.77.0.11/32",
+      "allowedIps": "0.0.0.0/0",
+      "persistentKeepalive": 25
+    }
+  ]
+}

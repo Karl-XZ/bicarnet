@@ -1,0 +1,868 @@
+using System.Diagnostics;
+using System.Net;
+using System.Security.Principal;
+using System.Text;
+using System.Text.Json;
+
+namespace DualNetClient;
+
+internal static class Program
+{
+    [STAThread]
+    private static void Main()
+    {
+        ApplicationConfiguration.Initialize();
+        Application.Run(new MainForm());
+    }
+}
+
+internal sealed class ClientProfile
+{
+    public string ProfileName { get; set; } = "dualnet-client-windows";
+    public string TunnelName { get; set; } = "dualnet-client-windows";
+    public string Account { get; set; } = "windows-user";
+    public string Endpoint { get; set; } = "";
+    public string LanEndpoint { get; set; } = "";
+    public string ConfigPath { get; set; } = "dualnet-client-windows.conf";
+    public string WireGuardExe { get; set; } = @"C:\Program Files\WireGuard\wireguard.exe";
+    public string StatusApiUrl { get; set; } = "http://10.77.0.1:8787/status";
+    public string GeneratedAt { get; set; } = "";
+}
+
+internal sealed class PeerStatus
+{
+    public string Name { get; set; } = "";
+    public string PublicKey { get; set; } = "";
+    public string Endpoint { get; set; } = "";
+    public string AllowedIps { get; set; } = "";
+    public long LatestHandshakeUnix { get; set; }
+    public string LatestHandshake { get; set; } = "never";
+    public long RxBytes { get; set; }
+    public long TxBytes { get; set; }
+    public bool Online { get; set; }
+}
+
+internal sealed class DeviceStatusResponse
+{
+    public string Server { get; set; } = "dualnet-server";
+    public string GeneratedAt { get; set; } = DateTimeOffset.Now.ToString("O");
+    public List<PeerStatus> Devices { get; set; } = new();
+}
+
+internal sealed class MainForm : Form
+{
+    private const int StatusApiPort = 8787;
+    private const string DefaultServerTunnel = "dualnet-server";
+    private static readonly Color Blue = Color.FromArgb(37, 99, 235);
+    private static readonly Color Green = Color.FromArgb(22, 163, 74);
+    private static readonly Color Red = Color.FromArgb(220, 38, 38);
+    private static readonly Color Slate = Color.FromArgb(51, 65, 85);
+    private static readonly Color Pale = Color.FromArgb(248, 250, 252);
+
+    private readonly Label _clientBadge = new();
+    private readonly Label _clientHeadline = new();
+    private readonly Label _clientHint = new();
+    private readonly Label _serverBadge = new();
+    private readonly Label _serverHeadline = new();
+    private readonly Label _serverHint = new();
+    private readonly TabControl _tabs = new();
+    private readonly FlowLayoutPanel _deviceCards = new();
+    private readonly Label _deviceSummary = new();
+    private readonly TextBox _diagnostics = new();
+    private readonly TextBox _profilePath = new();
+    private readonly TextBox _clientConfigPath = new();
+    private readonly TextBox _serverConfigPath = new();
+    private readonly TextBox _statusApi = new();
+
+    private ClientProfile _profile = new();
+    private HttpListener? _listener;
+    private CancellationTokenSource? _listenerCts;
+
+    public MainForm()
+    {
+        Text = "bicarnet";
+        Width = 1040;
+        Height = 740;
+        MinimumSize = new Size(900, 640);
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Pale;
+
+        _tabs.Dock = DockStyle.Fill;
+        _tabs.Font = new Font("Microsoft YaHei UI", 10);
+        Controls.Add(_tabs);
+
+        var home = new TabPage("首页");
+        var devices = new TabPage("设备");
+        var advanced = new TabPage("高级");
+        _tabs.TabPages.Add(home);
+        _tabs.TabPages.Add(devices);
+        _tabs.TabPages.Add(advanced);
+
+        BuildHome(home);
+        BuildDevices(devices);
+        BuildAdvanced(advanced);
+
+        LoadDefaultProfile();
+        LoadDefaultServerConfig();
+        RefreshAllStatus();
+        StartStatusApiIfServerIsRunning();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        StopStatusApi();
+        base.OnFormClosing(e);
+    }
+
+    private void BuildHome(TabPage page)
+    {
+        page.BackColor = Pale;
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(22) };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        page.Controls.Add(root);
+
+        root.Controls.Add(new Label
+        {
+            Text = "bicarnet 双向隧道",
+            Font = new Font("Microsoft YaHei UI", 22, FontStyle.Bold),
+            ForeColor = Color.FromArgb(15, 23, 42),
+            Height = 48,
+            Dock = DockStyle.Top
+        });
+
+        root.Controls.Add(new Label
+        {
+            Text = "选择这台电脑的角色，然后点击主按钮。普通用户无需查看日志或配置文件。",
+            Font = new Font("Microsoft YaHei UI", 10),
+            ForeColor = Slate,
+            Height = 30,
+            Dock = DockStyle.Top
+        });
+
+        var cards = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, RowCount = 1, Height = 230, Padding = new Padding(0, 14, 0, 0) };
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        root.Controls.Add(cards);
+
+        cards.Controls.Add(BuildRoleCard(
+            "作为连接端",
+            "让这台电脑连接到外网服务器，访问远程资源。",
+            _clientBadge,
+            _clientHeadline,
+            _clientHint,
+            "一键连接",
+            ConnectClient,
+            "断开连接",
+            DisconnectClient), 0, 0);
+
+        cards.Controls.Add(BuildRoleCard(
+            "作为服务端",
+            "让其他手机、电脑接入这台电脑，并查看在线设备。",
+            _serverBadge,
+            _serverHeadline,
+            _serverHint,
+            "一键启动服务端",
+            StartServer,
+            "停止服务端",
+            StopServer), 1, 0);
+
+        var tips = CardPanel();
+        tips.Dock = DockStyle.Top;
+        tips.Height = 150;
+        tips.Controls.Add(new Label
+        {
+            Text = "连接提示",
+            Font = new Font("Microsoft YaHei UI", 13, FontStyle.Bold),
+            ForeColor = Color.FromArgb(15, 23, 42),
+            Location = new Point(16, 14),
+            AutoSize = true
+        });
+        tips.Controls.Add(new Label
+        {
+            Text = "手机和这台电脑在同一 WiFi 时，请在 App 里选择“局域网节点”。手机使用 4G/外网时，请选择“公网节点”，并确认路由器已转发 UDP 51820。",
+            Font = new Font("Microsoft YaHei UI", 10),
+            ForeColor = Slate,
+            Location = new Point(16, 48),
+            Size = new Size(900, 58)
+        });
+        tips.Controls.Add(FlatButton("刷新状态", RefreshAllStatus, 120, new Point(16, 104)));
+        tips.Controls.Add(FlatButton("查看在线设备", ShowDevicesAndRefresh, 140, new Point(146, 104)));
+        root.Controls.Add(tips);
+    }
+
+    private Panel BuildRoleCard(string title, string desc, Label badge, Label headline, Label hint, string primaryText, Action primary, string secondaryText, Action secondary)
+    {
+        var card = CardPanel();
+        card.Dock = DockStyle.Fill;
+        card.Margin = new Padding(0, 0, 14, 0);
+        card.Controls.Add(new Label { Text = title, Font = new Font("Microsoft YaHei UI", 14, FontStyle.Bold), ForeColor = Color.FromArgb(15, 23, 42), Location = new Point(16, 14), AutoSize = true });
+        card.Controls.Add(new Label { Text = desc, Font = new Font("Microsoft YaHei UI", 10), ForeColor = Slate, Location = new Point(16, 48), Size = new Size(400, 42) });
+        badge.Font = new Font("Microsoft YaHei UI", 10, FontStyle.Bold);
+        badge.ForeColor = Color.White;
+        badge.BackColor = Slate;
+        badge.TextAlign = ContentAlignment.MiddleCenter;
+        badge.Location = new Point(16, 94);
+        badge.Size = new Size(92, 28);
+        card.Controls.Add(badge);
+        headline.Font = new Font("Microsoft YaHei UI", 11, FontStyle.Bold);
+        headline.ForeColor = Color.FromArgb(15, 23, 42);
+        headline.Location = new Point(120, 92);
+        headline.Size = new Size(330, 28);
+        card.Controls.Add(headline);
+        hint.Font = new Font("Microsoft YaHei UI", 9);
+        hint.ForeColor = Slate;
+        hint.Location = new Point(16, 128);
+        hint.Size = new Size(430, 32);
+        card.Controls.Add(hint);
+        card.Controls.Add(PrimaryButton(primaryText, primary, 150, new Point(16, 170)));
+        card.Controls.Add(OutlineButton(secondaryText, secondary, 120, new Point(178, 170)));
+        return card;
+    }
+
+    private void BuildDevices(TabPage page)
+    {
+        page.BackColor = Pale;
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(22) };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        page.Controls.Add(root);
+
+        root.Controls.Add(new Label { Text = "设备列表（在线/离线）", Font = new Font("Microsoft YaHei UI", 22, FontStyle.Bold), Height = 48, Dock = DockStyle.Top });
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 48 };
+        bar.Controls.Add(PrimaryButton("刷新设备", RefreshDevicesFromBestSource, 120, Point.Empty));
+        bar.Controls.Add(OutlineButton("从本机读取", RefreshDevicesFromLocalServer, 120, Point.Empty));
+        bar.Controls.Add(OutlineButton("从状态接口读取", RefreshDevicesFromStatusApi, 140, Point.Empty));
+        _deviceSummary.Text = "尚未刷新";
+        _deviceSummary.AutoSize = true;
+        _deviceSummary.Padding = new Padding(12, 9, 0, 0);
+        bar.Controls.Add(_deviceSummary);
+        root.Controls.Add(bar);
+
+        _deviceCards.Dock = DockStyle.Fill;
+        _deviceCards.FlowDirection = FlowDirection.TopDown;
+        _deviceCards.WrapContents = false;
+        _deviceCards.AutoScroll = true;
+        root.Controls.Add(_deviceCards);
+    }
+
+    private void BuildAdvanced(TabPage page)
+    {
+        page.BackColor = Pale;
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(22) };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        page.Controls.Add(root);
+
+        root.Controls.Add(new Label { Text = "高级设置与诊断", Font = new Font("Microsoft YaHei UI", 20, FontStyle.Bold), Height = 44, Dock = DockStyle.Top });
+
+        var grid = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 3, AutoSize = true };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+        root.Controls.Add(grid);
+        AddRow(grid, "Profile", _profilePath, OutlineButton("选择", BrowseProfile, 80, Point.Empty));
+        AddRow(grid, "连接端配置", _clientConfigPath, OutlineButton("选择", BrowseConfig, 80, Point.Empty));
+        AddRow(grid, "服务端配置", _serverConfigPath, OutlineButton("选择", BrowseServerConfig, 80, Point.Empty));
+        AddRow(grid, "设备接口", _statusApi, null);
+
+        _diagnostics.Multiline = true;
+        _diagnostics.ReadOnly = true;
+        _diagnostics.ScrollBars = ScrollBars.Vertical;
+        _diagnostics.Dock = DockStyle.Fill;
+        _diagnostics.Font = new Font("Consolas", 10);
+        root.Controls.Add(_diagnostics);
+    }
+
+    private static Panel CardPanel()
+    {
+        return new Panel { BackColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Padding = new Padding(12) };
+    }
+
+    private static Button PrimaryButton(string text, Action action, int width, Point location)
+    {
+        var button = new Button { Text = text, Width = width, Height = 34, Location = location, BackColor = Blue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
+        button.FlatAppearance.BorderSize = 0;
+        button.Click += (_, _) => RunUiAction(action);
+        return button;
+    }
+
+    private static Button OutlineButton(string text, Action action, int width, Point location)
+    {
+        var button = new Button { Text = text, Width = width, Height = 34, Location = location, BackColor = Color.White, ForeColor = Slate, FlatStyle = FlatStyle.Flat };
+        button.FlatAppearance.BorderColor = Color.FromArgb(203, 213, 225);
+        button.Click += (_, _) => RunUiAction(action);
+        return button;
+    }
+
+    private static void RunUiAction(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "bicarnet 操作失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static Button FlatButton(string text, Action action, int width, Point location)
+    {
+        var button = OutlineButton(text, action, width, location);
+        button.Height = 30;
+        return button;
+    }
+
+    private static void AddRow(TableLayoutPanel grid, string label, TextBox text, Control? right)
+    {
+        var row = grid.RowCount++;
+        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        grid.Controls.Add(new Label { Text = label, TextAlign = ContentAlignment.MiddleLeft, Height = 32, Dock = DockStyle.Fill }, 0, row);
+        text.Dock = DockStyle.Fill;
+        text.Margin = new Padding(0, 4, 8, 4);
+        grid.Controls.Add(text, 1, row);
+        if (right is not null) grid.Controls.Add(right, 2, row);
+    }
+
+    private void LoadDefaultProfile()
+    {
+        var candidates = new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "dualnet-client-windows.json"),
+            Path.Combine(Environment.CurrentDirectory, "dualnet-client-windows.json"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "bicarnet", "dualnet-client-windows.json"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DualNet", "dualnet-client-windows.json")
+        };
+        foreach (var path in candidates.Where(File.Exists))
+        {
+            LoadProfile(path);
+            return;
+        }
+        ApplyProfile();
+        SetClientMessage("未配置", "请选择连接端 Profile", "打开“高级”页选择 profile 文件。", Red);
+    }
+
+    private void LoadDefaultServerConfig()
+    {
+        var candidates = new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "server", "dualnet-server.conf"),
+            Path.Combine(AppContext.BaseDirectory, "dualnet-server.conf"),
+            Path.Combine(Environment.CurrentDirectory, "runtime", "server", "dualnet-server.conf")
+        };
+        _serverConfigPath.Text = candidates.FirstOrDefault(File.Exists) ?? "dualnet-server.conf";
+    }
+
+    private void BrowseProfile()
+    {
+        using var dialog = new OpenFileDialog { Filter = "bicarnet profile (*.json)|*.json|All files (*.*)|*.*" };
+        if (dialog.ShowDialog(this) == DialogResult.OK) LoadProfile(dialog.FileName);
+    }
+
+    private void BrowseConfig()
+    {
+        using var dialog = new OpenFileDialog { Filter = "WireGuard config (*.conf)|*.conf|All files (*.*)|*.*" };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        _profile.ConfigPath = dialog.FileName;
+        _profile.TunnelName = Path.GetFileNameWithoutExtension(dialog.FileName);
+        ApplyProfile();
+    }
+
+    private void BrowseServerConfig()
+    {
+        using var dialog = new OpenFileDialog { Filter = "WireGuard config (*.conf)|*.conf|All files (*.*)|*.*" };
+        if (dialog.ShowDialog(this) == DialogResult.OK) _serverConfigPath.Text = dialog.FileName;
+    }
+
+    private void LoadProfile(string path)
+    {
+        try
+        {
+            var json = File.ReadAllText(path, Encoding.UTF8);
+            _profile = JsonSerializer.Deserialize<ClientProfile>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new ClientProfile();
+            _profilePath.Text = path;
+            ApplyProfile();
+            Log($"已加载 profile: {path}");
+        }
+        catch (Exception ex)
+        {
+            Log($"加载 profile 失败: {ex.Message}");
+        }
+    }
+
+    private void ApplyProfile()
+    {
+        _clientConfigPath.Text = _profile.ConfigPath;
+        _statusApi.Text = string.IsNullOrWhiteSpace(_profile.StatusApiUrl) ? "http://10.77.0.1:8787/status" : _profile.StatusApiUrl;
+    }
+
+    private void RefreshAllStatus()
+    {
+        RefreshClientStatus();
+        RefreshServerStatus();
+    }
+
+    private void RefreshClientStatus()
+    {
+        var state = GetServiceState(_profile.TunnelName);
+        if (state == "运行中")
+            SetClientMessage("已连接", "连接端正在运行", $"节点：{_profile.Endpoint}", Green);
+        else if (state == "未安装")
+            SetClientMessage("未连接", "点击“一键连接”开始使用", $"同 WiFi 可在 App 选择局域网节点：{_profile.LanEndpoint}", Slate);
+        else
+            SetClientMessage("未运行", "连接端服务已安装但未运行", "可先断开，再重新一键连接。", Red);
+    }
+
+    private void RefreshServerStatus()
+    {
+        var state = GetServiceState(DefaultServerTunnel);
+        var apiRunning = _listener is not null;
+        if (state == "运行中" && apiRunning)
+            SetServerMessage("运行中", "服务端已准备好", $"设备列表接口：10.77.0.1:{StatusApiPort}", Green);
+        else if (state == "运行中")
+            SetServerMessage("部分就绪", "隧道已运行，设备接口未开启", "点击“启动状态接口”或重新点击“一键启动服务端”。", Blue);
+        else
+            SetServerMessage("未启动", "点击“一键启动服务端”", "启动后手机和电脑才能查看在线设备。", Slate);
+    }
+
+    private void SetClientMessage(string badge, string headline, string hint, Color color)
+    {
+        _clientBadge.Text = badge;
+        _clientBadge.BackColor = color;
+        _clientHeadline.Text = headline;
+        _clientHint.Text = hint;
+    }
+
+    private void SetServerMessage(string badge, string headline, string hint, Color color)
+    {
+        _serverBadge.Text = badge;
+        _serverBadge.BackColor = color;
+        _serverHeadline.Text = headline;
+        _serverHint.Text = hint;
+    }
+
+    private void ConnectClient()
+    {
+        SetClientMessage("正在连接", "正在安装并启动连接端", "通常需要几秒钟，请稍候。", Blue);
+        Application.DoEvents();
+        if (!ValidateAdminAndWireGuard()) return;
+        if (!File.Exists(_profile.ConfigPath))
+        {
+            MessageBox.Show("找不到连接配置。请打开“高级”页重新选择配置文件。", "无法连接", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        InstallTunnel(_profile.ConfigPath);
+        WaitForServiceState(_profile.TunnelName, "运行中", TimeSpan.FromSeconds(12));
+        RefreshClientStatus();
+        MessageBox.Show("连接端服务已启动。", "bicarnet", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private void DisconnectClient()
+    {
+        SetClientMessage("正在断开", "正在停止连接端", "请稍候。", Blue);
+        Application.DoEvents();
+        if (!ValidateAdminAndWireGuard()) return;
+        UninstallTunnel(_profile.TunnelName);
+        WaitForServiceState(_profile.TunnelName, "未安装", TimeSpan.FromSeconds(8));
+        RefreshClientStatus();
+    }
+
+    private void StartServer()
+    {
+        SetServerMessage("正在启动", "正在安装并启动服务端", "正在配置防火墙、WireGuard 隧道和设备状态接口。", Blue);
+        Application.DoEvents();
+        if (!ValidateAdminAndWireGuard()) return;
+        if (!File.Exists(_serverConfigPath.Text))
+        {
+            MessageBox.Show("找不到服务端配置。请打开“高级”页选择 dist/windows/server/dualnet-server.conf。", "无法启动服务端", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        EnsureFirewallRule("bicarnet WireGuard UDP 51820", "UDP", "51820");
+        EnsureFirewallRule($"bicarnet Status API TCP {StatusApiPort}", "TCP", StatusApiPort.ToString());
+        if (GetServiceState(DefaultServerTunnel) != "运行中")
+        {
+            InstallTunnel(_serverConfigPath.Text);
+            WaitForServiceState(DefaultServerTunnel, "运行中", TimeSpan.FromSeconds(12));
+        }
+        StartStatusApi();
+        RefreshServerStatus();
+        RefreshDevicesFromLocalServer();
+        if (GetServiceState(DefaultServerTunnel) == "运行中" && _listener is not null)
+            MessageBox.Show("服务端已启动。现在可以让手机或电脑连接，并在“设备”页刷新查看。", "bicarnet 服务端已就绪", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private void StopServer()
+    {
+        SetServerMessage("正在停止", "正在停止服务端", "请稍候。", Blue);
+        Application.DoEvents();
+        if (!ValidateAdminAndWireGuard()) return;
+        StopStatusApi();
+        UninstallTunnel(DefaultServerTunnel);
+        WaitForServiceState(DefaultServerTunnel, "未安装", TimeSpan.FromSeconds(8));
+        RefreshServerStatus();
+    }
+
+    private void RefreshDevicesFromBestSource()
+    {
+        if (GetServiceState(DefaultServerTunnel) == "运行中")
+            RefreshDevicesFromLocalServer();
+        else
+            RefreshDevicesFromStatusApi();
+    }
+
+    private void ShowDevicesAndRefresh()
+    {
+        if (_tabs.TabPages.Count > 1)
+            _tabs.SelectedIndex = 1;
+        RefreshDevicesFromBestSource();
+    }
+
+    private void StartStatusApiIfServerIsRunning()
+    {
+        if (GetServiceState(DefaultServerTunnel) != "运行中") return;
+        StartStatusApi();
+    }
+
+    private string GetServiceState(string tunnelName)
+    {
+        var result = RunProcess("sc.exe", $"query \"WireGuardTunnel${tunnelName}\"");
+        if (result.ExitCode != 0) return "未安装";
+        if (result.Output.Contains("RUNNING", StringComparison.OrdinalIgnoreCase)) return "运行中";
+        if (result.Output.Contains("STOPPED", StringComparison.OrdinalIgnoreCase)) return "已停止";
+        return "已安装";
+    }
+
+    private string WaitForServiceState(string tunnelName, string expectedState, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        string state;
+        do
+        {
+            state = GetServiceState(tunnelName);
+            if (state == expectedState) return state;
+            Application.DoEvents();
+            Thread.Sleep(300);
+        } while (DateTime.UtcNow < deadline);
+
+        return state;
+    }
+
+    private void RefreshDevicesFromLocalServer()
+    {
+        try
+        {
+            RenderDevices(BuildDeviceStatus());
+            Log("已从本机服务端读取设备列表。");
+        }
+        catch (Exception ex)
+        {
+            ShowDeviceError("无法读取本机设备列表", "请先在首页点击“一键启动服务端”。", ex.Message);
+        }
+    }
+
+    private async void RefreshDevicesFromStatusApi()
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var json = await http.GetStringAsync(_statusApi.Text.Trim());
+            var response = JsonSerializer.Deserialize<DeviceStatusResponse>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (response is null) throw new InvalidOperationException("状态接口返回空数据。");
+            RenderDevices(response);
+        }
+        catch (Exception ex)
+        {
+            ShowDeviceError("无法连接设备列表接口", "如果这是手机或远端电脑，请先确认 VPN 已连接；如果是服务端本机，请点击“一键启动服务端”。", ex.Message);
+        }
+    }
+
+    private void RenderDevices(DeviceStatusResponse response)
+    {
+        _deviceCards.Controls.Clear();
+        var online = response.Devices.Count(d => d.Online);
+        _deviceSummary.Text = $"{online}/{response.Devices.Count} 台在线，最后刷新 {DateTime.Now:HH:mm:ss}";
+        foreach (var d in response.Devices.OrderByDescending(d => d.Online).ThenBy(d => d.Name))
+            _deviceCards.Controls.Add(DeviceCard(d));
+    }
+
+    private void ShowDeviceError(string title, string suggestion, string detail)
+    {
+        _deviceCards.Controls.Clear();
+        _deviceSummary.Text = title;
+        var card = CardPanel();
+        card.Width = 860;
+        card.Height = 130;
+        card.Controls.Add(new Label { Text = title, Font = new Font("Microsoft YaHei UI", 13, FontStyle.Bold), ForeColor = Red, Location = new Point(16, 14), AutoSize = true });
+        card.Controls.Add(new Label { Text = suggestion, Font = new Font("Microsoft YaHei UI", 10), ForeColor = Slate, Location = new Point(16, 48), Size = new Size(790, 28) });
+        card.Controls.Add(new Label { Text = $"技术信息：{detail}", Font = new Font("Consolas", 9), ForeColor = Color.FromArgb(100, 116, 139), Location = new Point(16, 82), Size = new Size(790, 28) });
+        _deviceCards.Controls.Add(card);
+        Log($"{title}: {detail}");
+    }
+
+    private static Panel DeviceCard(PeerStatus d)
+    {
+        var card = CardPanel();
+        card.Width = 860;
+        card.Height = 118;
+        card.Margin = new Padding(0, 0, 0, 10);
+        var color = d.Online ? Green : Slate;
+        card.Controls.Add(new Label { Text = d.Online ? "在线" : "离线", BackColor = color, ForeColor = Color.White, TextAlign = ContentAlignment.MiddleCenter, Location = new Point(16, 16), Size = new Size(62, 26) });
+        card.Controls.Add(new Label { Text = d.Name, Font = new Font("Microsoft YaHei UI", 12, FontStyle.Bold), ForeColor = Color.FromArgb(15, 23, 42), Location = new Point(92, 14), Size = new Size(520, 28) });
+        card.Controls.Add(new Label { Text = $"地址：{d.AllowedIps}    来源：{(string.IsNullOrWhiteSpace(d.Endpoint) ? "尚未握手" : d.Endpoint)}", Font = new Font("Microsoft YaHei UI", 9), ForeColor = Slate, Location = new Point(92, 48), Size = new Size(720, 24) });
+        card.Controls.Add(new Label { Text = $"最近握手：{d.LatestHandshake}    流量：RX {FormatBytes(d.RxBytes)} / TX {FormatBytes(d.TxBytes)}", Font = new Font("Microsoft YaHei UI", 9), ForeColor = Slate, Location = new Point(92, 74), Size = new Size(720, 24) });
+        return card;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        return $"{bytes / 1024.0 / 1024.0:F1} MB";
+    }
+
+    private void StartStatusApi()
+    {
+        if (_listener is not null)
+        {
+            RefreshServerStatus();
+            return;
+        }
+        try
+        {
+            _listenerCts = new CancellationTokenSource();
+            _listener = new HttpListener();
+            _listener.Prefixes.Add($"http://+:{StatusApiPort}/");
+            _listener.Start();
+            _ = Task.Run(() => ListenLoop(_listenerCts.Token));
+            Log($"状态接口已启动: http://10.77.0.1:{StatusApiPort}/status");
+        }
+        catch (Exception ex)
+        {
+            _listener = null;
+            MessageBox.Show($"状态接口启动失败：{ex.Message}", "需要检查权限或端口占用", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        RefreshServerStatus();
+    }
+
+    private void StopStatusApi()
+    {
+        try
+        {
+            _listenerCts?.Cancel();
+            _listener?.Stop();
+            _listener?.Close();
+        }
+        catch { }
+        finally
+        {
+            _listener = null;
+            _listenerCts = null;
+        }
+        RefreshServerStatus();
+    }
+
+    private async Task ListenLoop(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested && _listener is not null && _listener.IsListening)
+        {
+            try
+            {
+                var context = await _listener.GetContextAsync();
+                _ = Task.Run(() => HandleRequest(context), token);
+            }
+            catch when (token.IsCancellationRequested) { return; }
+            catch { if (_listener is null || !_listener.IsListening) return; }
+        }
+    }
+
+    private void HandleRequest(HttpListenerContext context)
+    {
+        try
+        {
+            if (!context.Request.Url?.AbsolutePath.Equals("/status", StringComparison.OrdinalIgnoreCase) ?? true)
+            {
+                context.Response.StatusCode = 404;
+                context.Response.Close();
+                return;
+            }
+            var json = JsonSerializer.Serialize(BuildDeviceStatus(), new JsonSerializerOptions { WriteIndented = true });
+            var bytes = Encoding.UTF8.GetBytes(json);
+            context.Response.ContentType = "application/json; charset=utf-8";
+            context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+            context.Response.OutputStream.Write(bytes, 0, bytes.Length);
+            context.Response.Close();
+        }
+        catch (Exception ex)
+        {
+            var bytes = Encoding.UTF8.GetBytes("{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}");
+            context.Response.StatusCode = 500;
+            context.Response.ContentType = "application/json; charset=utf-8";
+            context.Response.OutputStream.Write(bytes, 0, bytes.Length);
+            context.Response.Close();
+        }
+    }
+
+    private DeviceStatusResponse BuildDeviceStatus()
+    {
+        var result = RunProcess(ResolveWireGuardTool("wg.exe"), $"show {DefaultServerTunnel} dump");
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(result.Error.Trim().Length > 0 ? result.Error.Trim() : result.Output.Trim());
+
+        var names = ParsePeerNames(_serverConfigPath.Text);
+        var devices = new List<PeerStatus>();
+        var lines = result.Output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var line in lines.Skip(1))
+        {
+            var parts = line.Split('\t');
+            if (parts.Length < 8) continue;
+            var publicKey = parts[0];
+            var latest = long.TryParse(parts[4], out var ts) ? ts : 0;
+            var rx = long.TryParse(parts[5], out var r) ? r : 0;
+            var tx = long.TryParse(parts[6], out var t) ? t : 0;
+            devices.Add(new PeerStatus
+            {
+                Name = names.TryGetValue(publicKey, out var name) ? name : publicKey[..Math.Min(12, publicKey.Length)],
+                PublicKey = publicKey,
+                Endpoint = parts[2] == "(none)" ? "" : parts[2],
+                AllowedIps = parts[3],
+                LatestHandshakeUnix = latest,
+                LatestHandshake = FormatHandshake(latest),
+                RxBytes = rx,
+                TxBytes = tx,
+                Online = latest > 0 && DateTimeOffset.UtcNow.ToUnixTimeSeconds() - latest <= 180
+            });
+        }
+        return new DeviceStatusResponse { Server = DefaultServerTunnel, GeneratedAt = DateTimeOffset.Now.ToString("O"), Devices = devices };
+    }
+
+    private static Dictionary<string, string> ParsePeerNames(string configPath)
+    {
+        var map = new Dictionary<string, string>();
+        if (!File.Exists(configPath)) return map;
+        string? pendingName = null;
+        foreach (var raw in File.ReadLines(configPath))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith("#"))
+            {
+                pendingName = line.TrimStart('#').Trim();
+                continue;
+            }
+            if (line.StartsWith("PublicKey", StringComparison.OrdinalIgnoreCase) && pendingName is not null)
+            {
+                map[line.Split('=', 2)[1].Trim()] = pendingName;
+                pendingName = null;
+            }
+        }
+        return map;
+    }
+
+    private static string FormatHandshake(long unix)
+    {
+        if (unix <= 0) return "从未连接";
+        var dt = DateTimeOffset.FromUnixTimeSeconds(unix).LocalDateTime;
+        var age = DateTime.Now - dt;
+        if (age.TotalSeconds < 60) return $"{Math.Max(0, (int)age.TotalSeconds)} 秒前";
+        if (age.TotalMinutes < 60) return $"{(int)age.TotalMinutes} 分钟前";
+        if (age.TotalHours < 24) return $"{(int)age.TotalHours} 小时前";
+        return dt.ToString("yyyy-MM-dd HH:mm");
+    }
+
+    private bool ValidateAdminAndWireGuard()
+    {
+        if (!IsAdministrator())
+        {
+            MessageBox.Show("请以管理员身份运行 bicarnet。安装或停止隧道服务需要管理员权限。", "需要管理员权限", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
+        try { ResolveWireGuardTool("wireguard.exe"); return true; }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "未找到 WireGuard", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+    }
+
+    private void InstallTunnel(string configPath)
+    {
+        var tunnelName = Path.GetFileNameWithoutExtension(configPath);
+        if (GetServiceState(tunnelName) != "未安装") UninstallTunnel(tunnelName);
+        RunLogged(ResolveWireGuardTool("wireguard.exe"), $"/installtunnelservice \"{Path.GetFullPath(configPath)}\"");
+    }
+
+    private void UninstallTunnel(string tunnelName)
+    {
+        if (GetServiceState(tunnelName) == "未安装") return;
+        RunLogged(ResolveWireGuardTool("wireguard.exe"), $"/uninstalltunnelservice {tunnelName}");
+    }
+
+    private static string ResolveWireGuardTool(string name)
+    {
+        var candidates = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WireGuard", name),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "WireGuard", name)
+        };
+        foreach (var candidate in candidates)
+            if (File.Exists(candidate)) return candidate;
+        throw new FileNotFoundException($"找不到 {name}。请先安装 WireGuard for Windows。");
+    }
+
+    private void EnsureFirewallRule(string displayName, string protocol, string port)
+    {
+        var check = RunProcess("powershell.exe", $"-NoProfile -NonInteractive -Command \"Get-NetFirewallRule -DisplayName '{displayName}' -ErrorAction SilentlyContinue\"");
+        if (check.ExitCode == 0 && !string.IsNullOrWhiteSpace(check.Output)) return;
+        RunLogged("powershell.exe", $"-NoProfile -NonInteractive -Command \"New-NetFirewallRule -DisplayName '{displayName}' -Direction Inbound -Action Allow -Protocol {protocol} -LocalPort {port}\"");
+    }
+
+    private void RunLogged(string fileName, string arguments)
+    {
+        Log($"> {Path.GetFileName(fileName)} {arguments}");
+        var result = RunProcess(fileName, arguments);
+        if (!string.IsNullOrWhiteSpace(result.Output)) Log(result.Output.Trim());
+        if (!string.IsNullOrWhiteSpace(result.Error)) Log(result.Error.Trim());
+        Log($"ExitCode: {result.ExitCode}");
+    }
+
+    private static (int ExitCode, string Output, string Error) RunProcess(string fileName, string arguments)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = fileName,
+            Arguments = arguments,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+            CreateNoWindow = true
+        };
+        using var process = Process.Start(psi) ?? throw new InvalidOperationException($"Unable to start {fileName}");
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return (process.ExitCode, output, error);
+    }
+
+    private static bool IsAdministrator()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+    }
+
+    private void Log(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return;
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => Log(message));
+            return;
+        }
+        _diagnostics.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+    }
+}
