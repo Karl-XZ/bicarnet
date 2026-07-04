@@ -1,7 +1,7 @@
 {
   "server": {
     "name": "dualnet-server",
-    "publicEndpoint": "YOUR_PUBLIC_IP_OR_DOMAIN",
+    "publicEndpoint": "YOUR_DDNS_DOMAIN",
     "lanEndpoint": "192.168.0.104",
     "listenPort": 51820,
     "statusApiPort": 8787,
