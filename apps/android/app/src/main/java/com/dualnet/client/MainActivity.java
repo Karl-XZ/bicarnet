@@ -656,6 +656,10 @@ public class MainActivity extends Activity {
         payload.put("deviceId", localDeviceId);
         payload.put("deviceName", localDeviceName);
         payload.put("platform", "android");
+        payload.put("role", "client");
+        payload.put("profileName", profileName);
+        payload.put("account", profileAccount);
+        payload.put("tunnelAddress", localTunnelAddress);
         byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
         for (String urlValue : activationUrlCandidates()) {
             try {

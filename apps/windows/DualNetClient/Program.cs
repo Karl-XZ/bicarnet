@@ -57,6 +57,10 @@ internal sealed class ActivationRequest
     public string DeviceId { get; set; } = "";
     public string DeviceName { get; set; } = "";
     public string Platform { get; set; } = "";
+    public string Role { get; set; } = "client";
+    public string ProfileName { get; set; } = "";
+    public string Account { get; set; } = "";
+    public string TunnelAddress { get; set; } = "";
 }
 
 internal sealed class ActivationResponse
@@ -72,6 +76,7 @@ internal sealed class LocalActivation
     public string DeviceId { get; set; } = "";
     public string DeviceName { get; set; } = "";
     public string Platform { get; set; } = "windows";
+    public string Role { get; set; } = "client";
     public string Token { get; set; } = "";
     public string ActivatedAt { get; set; } = "";
 }
@@ -86,12 +91,58 @@ internal sealed class ActivationCodeRecord
 {
     public string CodeHash { get; set; } = "";
     public string CodeSuffix { get; set; } = "";
+    public string Role { get; set; } = "client";
     public bool Redeemed { get; set; }
     public string DeviceIdHash { get; set; } = "";
     public string DeviceName { get; set; } = "";
     public string Platform { get; set; } = "";
+    public string ProfileName { get; set; } = "";
+    public string Account { get; set; } = "";
+    public string TunnelAddress { get; set; } = "";
     public string ActivatedAt { get; set; } = "";
     public string TokenHash { get; set; } = "";
+    public bool Blocked { get; set; }
+    public string BlockedAt { get; set; } = "";
+    public string BlockReason { get; set; } = "";
+}
+
+internal sealed class AdminDeviceRecord
+{
+    public string DeviceIdHash { get; set; } = "";
+    public string DeviceName { get; set; } = "";
+    public string Platform { get; set; } = "";
+    public string Role { get; set; } = "client";
+    public string ProfileName { get; set; } = "";
+    public string Account { get; set; } = "";
+    public string TunnelAddress { get; set; } = "";
+    public string ActivatedAt { get; set; } = "";
+    public bool Blocked { get; set; }
+    public string BlockedAt { get; set; } = "";
+    public string BlockReason { get; set; } = "";
+    public bool Online { get; set; }
+    public string Endpoint { get; set; } = "";
+    public string LatestHandshake { get; set; } = "";
+    public long RxBytes { get; set; }
+    public long TxBytes { get; set; }
+}
+
+internal sealed class AdminDevicesResponse
+{
+    public string GeneratedAt { get; set; } = DateTimeOffset.Now.ToString("O");
+    public List<AdminDeviceRecord> Devices { get; set; } = new();
+}
+
+internal sealed class AdminActionRequest
+{
+    public string DeviceIdHash { get; set; } = "";
+    public string Reason { get; set; } = "";
+}
+
+internal sealed class ServerPeerConfig
+{
+    public string Name { get; set; } = "";
+    public string PublicKey { get; set; } = "";
+    public string AllowedIps { get; set; } = "";
 }
 
 internal sealed class MainForm : Form
@@ -102,6 +153,11 @@ internal sealed class MainForm : Form
     private static readonly bool ClientOnly = true;
 #else
     private static readonly bool ClientOnly = false;
+#endif
+#if BICARNET_ADMIN_ONLY
+    private static readonly bool AdminOnly = true;
+#else
+    private static readonly bool AdminOnly = false;
 #endif
     private static readonly Color Blue = Color.FromArgb(37, 99, 235);
     private static readonly Color Green = Color.FromArgb(22, 163, 74);
@@ -123,6 +179,9 @@ internal sealed class MainForm : Form
     private readonly TextBox _clientConfigPath = new();
     private readonly TextBox _serverConfigPath = new();
     private readonly TextBox _statusApi = new();
+    private readonly FlowLayoutPanel _adminDeviceCards = new();
+    private readonly Label _adminSummary = new();
+    private readonly Dictionary<string, AdminDeviceRecord> _adminDevices = new();
 
     private ClientProfile _profile = new();
     private HttpListener? _listener;
@@ -147,10 +206,14 @@ internal sealed class MainForm : Form
         _tabs.TabPages.Add(home);
         _tabs.TabPages.Add(devices);
         _tabs.TabPages.Add(advanced);
+        if (AdminOnly)
+            _tabs.TabPages.Add(new TabPage("管理"));
 
         BuildHome(home);
         BuildDevices(devices);
         BuildAdvanced(advanced);
+        if (AdminOnly)
+            BuildAdmin(_tabs.TabPages[^1]);
 
         LoadDefaultProfile();
         LoadDefaultServerConfig();
@@ -343,6 +406,31 @@ internal sealed class MainForm : Form
         _diagnostics.Dock = DockStyle.Fill;
         _diagnostics.Font = new Font("Consolas", 10);
         root.Controls.Add(_diagnostics);
+    }
+
+    private void BuildAdmin(TabPage page)
+    {
+        page.BackColor = Pale;
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(22) };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        page.Controls.Add(root);
+
+        root.Controls.Add(new Label { Text = "管理端", Font = new Font("Microsoft YaHei UI", 22, FontStyle.Bold), Height = 48, Dock = DockStyle.Top });
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 48 };
+        bar.Controls.Add(PrimaryButton("刷新绑定设备", RefreshAdminDevices, 140, Point.Empty));
+        _adminSummary.Text = "尚未刷新";
+        _adminSummary.AutoSize = true;
+        _adminSummary.Padding = new Padding(12, 9, 0, 0);
+        bar.Controls.Add(_adminSummary);
+        root.Controls.Add(bar);
+
+        _adminDeviceCards.Dock = DockStyle.Fill;
+        _adminDeviceCards.FlowDirection = FlowDirection.TopDown;
+        _adminDeviceCards.WrapContents = false;
+        _adminDeviceCards.AutoScroll = true;
+        root.Controls.Add(_adminDeviceCards);
     }
 
     private static Panel CardPanel()
@@ -582,6 +670,7 @@ internal sealed class MainForm : Form
                 DeviceId = GetDeviceId(),
                 DeviceName = Environment.MachineName,
                 Platform = "windows",
+                Role = AdminOnly ? "admin" : "client",
                 Token = response.Token,
                 ActivatedAt = string.IsNullOrWhiteSpace(response.ActivatedAt) ? DateTimeOffset.Now.ToString("O") : response.ActivatedAt
             });
@@ -607,6 +696,7 @@ internal sealed class MainForm : Form
             return activation is not null
                 && activation.DeviceId == GetDeviceId()
                 && activation.Platform.Equals("windows", StringComparison.OrdinalIgnoreCase)
+                && activation.Role.Equals(AdminOnly ? "admin" : "client", StringComparison.OrdinalIgnoreCase)
                 && !string.IsNullOrWhiteSpace(activation.Token);
         }
         catch { return false; }
@@ -619,7 +709,11 @@ internal sealed class MainForm : Form
             Code = code,
             DeviceId = GetDeviceId(),
             DeviceName = Environment.MachineName,
-            Platform = "windows"
+            Platform = "windows",
+            Role = AdminOnly ? "admin" : "client",
+            ProfileName = _profile.ProfileName,
+            Account = _profile.Account,
+            TunnelAddress = GetConfigAddress(_profile.ConfigPath)
         };
         var body = JsonSerializer.Serialize(request);
         Exception? last = null;
@@ -671,6 +765,24 @@ internal sealed class MainForm : Form
         return value.Trim();
     }
 
+    private static string GetConfigAddress(string configPath)
+    {
+        try
+        {
+            if (!File.Exists(configPath)) return "";
+            foreach (var line in File.ReadLines(configPath))
+            {
+                var trimmed = line.Trim();
+                if (!trimmed.StartsWith("Address", StringComparison.OrdinalIgnoreCase)) continue;
+                var parts = trimmed.Split('=', 2);
+                if (parts.Length != 2) return "";
+                return parts[1].Split(',')[0].Trim();
+            }
+        }
+        catch { }
+        return "";
+    }
+
     private static void SaveLocalActivation(LocalActivation activation)
     {
         var path = GetLocalActivationPath();
@@ -680,7 +792,7 @@ internal sealed class MainForm : Form
 
     private static string GetLocalActivationPath()
     {
-        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "bicarnet", "activation.json");
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "bicarnet", AdminOnly ? "admin-activation.json" : "activation.json");
     }
 
     private static string GetDeviceId()
@@ -739,6 +851,7 @@ internal sealed class MainForm : Form
             WaitForServiceState(DefaultServerTunnel, "运行中", TimeSpan.FromSeconds(12));
         }
         StartStatusApi();
+        ApplyBlockedPeers();
         RefreshServerStatus();
         RefreshDevicesFromLocalServer();
         if (GetServiceState(DefaultServerTunnel) == "运行中" && _listener is not null)
@@ -835,6 +948,106 @@ internal sealed class MainForm : Form
         {
             ShowDeviceError("无法连接设备列表接口", "如果这是手机或远端电脑，请先确认 VPN 已连接；如果是服务端本机，请点击“一键启动服务端”。", ex.Message);
         }
+    }
+
+    private async void RefreshAdminDevices()
+    {
+        try
+        {
+            if (!EnsureActivated()) return;
+            var token = LoadLocalActivationToken();
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+            http.DefaultRequestHeaders.Add("X-Bicarnet-Admin-Token", token);
+            var json = await http.GetStringAsync(AdminUrl("/admin/devices"));
+            var response = JsonSerializer.Deserialize<AdminDevicesResponse>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (response is null) throw new InvalidOperationException("管理接口返回空数据。");
+            RenderAdminDevices(response);
+        }
+        catch (Exception ex)
+        {
+            _adminDeviceCards.Controls.Clear();
+            _adminSummary.Text = "刷新失败";
+            var card = CardPanel();
+            card.Width = 860;
+            card.Height = 110;
+            card.Controls.Add(new Label { Text = "无法读取管理设备列表", Font = new Font("Microsoft YaHei UI", 13, FontStyle.Bold), ForeColor = Red, Location = new Point(16, 14), AutoSize = true });
+            card.Controls.Add(new Label { Text = ex.Message, Font = new Font("Consolas", 9), ForeColor = Slate, Location = new Point(16, 50), Size = new Size(790, 40) });
+            _adminDeviceCards.Controls.Add(card);
+        }
+    }
+
+    private void RenderAdminDevices(AdminDevicesResponse response)
+    {
+        _adminDevices.Clear();
+        _adminDeviceCards.Controls.Clear();
+        var clientDevices = response.Devices.Where(d => d.Role != "admin").ToList();
+        _adminSummary.Text = $"{clientDevices.Count(d => d.Online)}/{clientDevices.Count} 台客户端在线，绑定总数 {response.Devices.Count}";
+        foreach (var d in response.Devices.OrderBy(d => d.Role == "admin").ThenBy(d => d.Blocked).ThenBy(d => d.DeviceName))
+        {
+            _adminDevices[d.DeviceIdHash] = d;
+            _adminDeviceCards.Controls.Add(AdminDeviceCard(d));
+        }
+    }
+
+    private Panel AdminDeviceCard(AdminDeviceRecord d)
+    {
+        var card = CardPanel();
+        card.Width = 880;
+        card.Height = 138;
+        card.Margin = new Padding(0, 0, 0, 10);
+        var color = d.Blocked ? Red : d.Online ? Green : Slate;
+        card.Controls.Add(new Label { Text = d.Role == "admin" ? "管理员" : d.Blocked ? "已停用" : d.Online ? "在线" : "离线", BackColor = color, ForeColor = Color.White, TextAlign = ContentAlignment.MiddleCenter, Location = new Point(16, 16), Size = new Size(74, 26) });
+        card.Controls.Add(new Label { Text = $"{d.DeviceName} / {d.ProfileName}", Font = new Font("Microsoft YaHei UI", 12, FontStyle.Bold), ForeColor = Color.FromArgb(15, 23, 42), Location = new Point(106, 14), Size = new Size(540, 28) });
+        card.Controls.Add(new Label { Text = $"账号：{d.Account}    地址：{d.TunnelAddress}    平台：{d.Platform}", Font = new Font("Microsoft YaHei UI", 9), ForeColor = Slate, Location = new Point(106, 46), Size = new Size(720, 22) });
+        card.Controls.Add(new Label { Text = $"来源：{(string.IsNullOrWhiteSpace(d.Endpoint) ? "尚未握手" : d.Endpoint)}    最近握手：{d.LatestHandshake}", Font = new Font("Microsoft YaHei UI", 9), ForeColor = Slate, Location = new Point(106, 70), Size = new Size(720, 22) });
+        card.Controls.Add(new Label { Text = $"激活：{d.ActivatedAt}    {(d.Blocked ? "停用原因：" + d.BlockReason : "")}", Font = new Font("Microsoft YaHei UI", 9), ForeColor = Slate, Location = new Point(106, 94), Size = new Size(560, 22) });
+        if (d.Role != "admin")
+        {
+            var action = d.Blocked ? OutlineButton("恢复", () => SetAdminDeviceBlocked(d.DeviceIdHash, false), 80, new Point(760, 54))
+                                   : OutlineButton("踢下线", () => SetAdminDeviceBlocked(d.DeviceIdHash, true), 80, new Point(760, 54));
+            card.Controls.Add(action);
+        }
+        return card;
+    }
+
+    private async void SetAdminDeviceBlocked(string deviceIdHash, bool blocked)
+    {
+        try
+        {
+            if (!_adminDevices.TryGetValue(deviceIdHash, out var device)) return;
+            var confirm = MessageBox.Show(blocked ? $"确认踢下线并停用 {device.DeviceName}？" : $"确认恢复 {device.DeviceName}？", "bicarnet 管理", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+            if (confirm != DialogResult.OK) return;
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+            http.DefaultRequestHeaders.Add("X-Bicarnet-Admin-Token", LoadLocalActivationToken());
+            var body = JsonSerializer.Serialize(new AdminActionRequest { DeviceIdHash = deviceIdHash, Reason = blocked ? "管理员手动停用" : "" });
+            using var content = new StringContent(body, Encoding.UTF8, "application/json");
+            using var response = await http.PostAsync(AdminUrl(blocked ? "/admin/block" : "/admin/unblock"), content);
+            var text = await response.Content.ReadAsStringAsync();
+            if (!response.IsSuccessStatusCode) throw new InvalidOperationException(text);
+            MessageBox.Show(text, "bicarnet 管理", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            RefreshAdminDevices();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "管理操作失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private string LoadLocalActivationToken()
+    {
+        var path = GetLocalActivationPath();
+        if (!File.Exists(path)) throw new InvalidOperationException("管理端尚未激活。");
+        var activation = JsonSerializer.Deserialize<LocalActivation>(File.ReadAllText(path, Encoding.UTF8), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (activation is null || string.IsNullOrWhiteSpace(activation.Token)) throw new InvalidOperationException("管理端激活信息无效。");
+        return activation.Token;
+    }
+
+    private string AdminUrl(string path)
+    {
+        var status = _statusApi.Text.Trim();
+        if (!Uri.TryCreate(status, UriKind.Absolute, out var uri))
+            return "http://10.77.0.1:8787" + path;
+        return new UriBuilder(uri) { Path = path.TrimStart('/'), Query = "" }.Uri.ToString();
     }
 
     private void RenderDevices(DeviceStatusResponse response)
@@ -946,6 +1159,21 @@ internal sealed class MainForm : Form
                 HandleActivationRequest(context);
                 return;
             }
+            if (path.Equals("/admin/devices", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleAdminDevicesRequest(context);
+                return;
+            }
+            if (path.Equals("/admin/block", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleAdminActionRequest(context, true);
+                return;
+            }
+            if (path.Equals("/admin/unblock", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleAdminActionRequest(context, false);
+                return;
+            }
 
             if (!path.Equals("/status", StringComparison.OrdinalIgnoreCase))
             {
@@ -999,9 +1227,16 @@ internal sealed class MainForm : Form
             var codeHash = Sha256(NormalizeCode(request.Code));
             var deviceHash = Sha256(request.DeviceId);
             var record = store.Codes.FirstOrDefault(c => c.CodeHash.Equals(codeHash, StringComparison.OrdinalIgnoreCase));
+            var requestedRole = NormalizeRole(request.Role);
             if (record is null)
             {
                 WriteJson(context, 403, new ActivationResponse { Ok = false, Message = "激活码无效。" });
+                return;
+            }
+
+            if (!NormalizeRole(record.Role).Equals(requestedRole, StringComparison.OrdinalIgnoreCase))
+            {
+                WriteJson(context, 403, new ActivationResponse { Ok = false, Message = requestedRole == "admin" ? "这不是管理员激活码。" : "这不是客户端激活码。" });
                 return;
             }
 
@@ -1011,17 +1246,194 @@ internal sealed class MainForm : Form
                 return;
             }
 
+            if (record.Blocked && record.DeviceIdHash.Equals(deviceHash, StringComparison.OrdinalIgnoreCase))
+            {
+                WriteJson(context, 403, new ActivationResponse { Ok = false, Message = "此设备已被管理员停用。" });
+                return;
+            }
+
             var token = NewToken();
             var activatedAt = DateTimeOffset.Now.ToString("O");
             record.Redeemed = true;
             record.DeviceIdHash = deviceHash;
             record.DeviceName = request.DeviceName;
             record.Platform = request.Platform;
+            record.Role = requestedRole;
+            record.ProfileName = request.ProfileName;
+            record.Account = request.Account;
+            record.TunnelAddress = request.TunnelAddress;
             record.ActivatedAt = activatedAt;
             record.TokenHash = Sha256(token);
             File.WriteAllText(storePath, JsonSerializer.Serialize(store, new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
             WriteJson(context, 200, new ActivationResponse { Ok = true, Message = "激活成功。", Token = token, ActivatedAt = activatedAt });
         }
+    }
+
+    private void HandleAdminDevicesRequest(HttpListenerContext context)
+    {
+        if (!IsAdminRequest(context))
+        {
+            WriteJson(context, 403, new { ok = false, message = "Admin token required." });
+            return;
+        }
+        WriteJson(context, 200, BuildAdminDevicesResponse());
+    }
+
+    private void HandleAdminActionRequest(HttpListenerContext context, bool block)
+    {
+        if (!context.Request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase))
+        {
+            WriteJson(context, 405, new { ok = false, message = "POST required." });
+            return;
+        }
+        if (!IsAdminRequest(context))
+        {
+            WriteJson(context, 403, new { ok = false, message = "Admin token required." });
+            return;
+        }
+
+        var body = new StreamReader(context.Request.InputStream, context.Request.ContentEncoding ?? Encoding.UTF8).ReadToEnd();
+        var request = JsonSerializer.Deserialize<AdminActionRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (request is null || string.IsNullOrWhiteSpace(request.DeviceIdHash))
+        {
+            WriteJson(context, 400, new { ok = false, message = "DeviceIdHash required." });
+            return;
+        }
+
+        lock (typeof(MainForm))
+        {
+            var storePath = GetActivationStorePath();
+            var store = LoadActivationStore(storePath);
+            var record = store.Codes.FirstOrDefault(c => c.Redeemed && c.DeviceIdHash.Equals(request.DeviceIdHash, StringComparison.OrdinalIgnoreCase));
+            if (record is null)
+            {
+                WriteJson(context, 404, new { ok = false, message = "Device not found." });
+                return;
+            }
+            if (NormalizeRole(record.Role) == "admin")
+            {
+                WriteJson(context, 400, new { ok = false, message = "Admin devices cannot be blocked from this UI." });
+                return;
+            }
+
+            record.Blocked = block;
+            record.BlockedAt = block ? DateTimeOffset.Now.ToString("O") : "";
+            record.BlockReason = block ? request.Reason : "";
+            SaveActivationStore(storePath, store);
+
+            var wireGuardMessage = block ? TryRemovePeer(record) : TryRestorePeer(record);
+            WriteJson(context, 200, new { ok = true, blocked = block, message = wireGuardMessage });
+        }
+    }
+
+    private bool IsAdminRequest(HttpListenerContext context)
+    {
+        var token = context.Request.Headers["X-Bicarnet-Admin-Token"] ?? "";
+        if (string.IsNullOrWhiteSpace(token)) return false;
+        var tokenHash = Sha256(token);
+        var storePath = GetActivationStorePath();
+        if (!File.Exists(storePath)) return false;
+        var store = LoadActivationStore(storePath);
+        return store.Codes.Any(c =>
+            c.Redeemed &&
+            !c.Blocked &&
+            NormalizeRole(c.Role) == "admin" &&
+            c.TokenHash.Equals(tokenHash, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private AdminDevicesResponse BuildAdminDevicesResponse()
+    {
+        var store = LoadActivationStore(GetActivationStorePath());
+        var status = TryBuildDeviceStatus();
+        var devices = new List<AdminDeviceRecord>();
+        foreach (var record in store.Codes.Where(c => c.Redeemed))
+        {
+            var peer = FindPeerStatus(status, record);
+            devices.Add(new AdminDeviceRecord
+            {
+                DeviceIdHash = record.DeviceIdHash,
+                DeviceName = record.DeviceName,
+                Platform = record.Platform,
+                Role = NormalizeRole(record.Role),
+                ProfileName = record.ProfileName,
+                Account = record.Account,
+                TunnelAddress = record.TunnelAddress,
+                ActivatedAt = record.ActivatedAt,
+                Blocked = record.Blocked,
+                BlockedAt = record.BlockedAt,
+                BlockReason = record.BlockReason,
+                Online = peer?.Online ?? false,
+                Endpoint = peer?.Endpoint ?? "",
+                LatestHandshake = peer?.LatestHandshake ?? "",
+                RxBytes = peer?.RxBytes ?? 0,
+                TxBytes = peer?.TxBytes ?? 0
+            });
+        }
+        return new AdminDevicesResponse { Devices = devices.OrderBy(d => d.Role).ThenBy(d => d.Blocked).ThenBy(d => d.DeviceName).ToList() };
+    }
+
+    private DeviceStatusResponse TryBuildDeviceStatus()
+    {
+        try { return BuildDeviceStatus(); }
+        catch { return new DeviceStatusResponse(); }
+    }
+
+    private static PeerStatus? FindPeerStatus(DeviceStatusResponse response, ActivationCodeRecord record)
+    {
+        var tunnelIp = AddressIp(record.TunnelAddress);
+        return response.Devices.FirstOrDefault(d =>
+            (!string.IsNullOrWhiteSpace(record.ProfileName) && d.Name.Contains(record.ProfileName, StringComparison.OrdinalIgnoreCase)) ||
+            (!string.IsNullOrWhiteSpace(tunnelIp) && d.AllowedIps.Contains(tunnelIp, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private string TryRemovePeer(ActivationCodeRecord record)
+    {
+        var peer = FindServerPeer(record);
+        if (peer is null) return "已停用，但未找到可移除的 WireGuard peer。";
+        var result = RunProcess(ResolveWireGuardTool("wg.exe"), $"set {DefaultServerTunnel} peer {peer.PublicKey} remove");
+        return result.ExitCode == 0 ? "已停用并踢下线。" : $"已停用，踢下线失败：{result.Error}{result.Output}";
+    }
+
+    private void ApplyBlockedPeers()
+    {
+        try
+        {
+            var storePath = GetActivationStorePath();
+            if (!File.Exists(storePath)) return;
+            var store = LoadActivationStore(storePath);
+            foreach (var record in store.Codes.Where(c => c.Redeemed && c.Blocked && NormalizeRole(c.Role) != "admin"))
+                Log(TryRemovePeer(record));
+        }
+        catch (Exception ex)
+        {
+            Log("应用停用设备列表失败: " + ex.Message);
+        }
+    }
+
+    private string TryRestorePeer(ActivationCodeRecord record)
+    {
+        var peer = FindServerPeer(record);
+        if (peer is null) return "已恢复，但未找到可恢复的 WireGuard peer。";
+        var result = RunProcess(ResolveWireGuardTool("wg.exe"), $"set {DefaultServerTunnel} peer {peer.PublicKey} allowed-ips {peer.AllowedIps}");
+        return result.ExitCode == 0 ? "已恢复并重新允许连接。" : $"已恢复，WireGuard 恢复失败：{result.Error}{result.Output}";
+    }
+
+    private ServerPeerConfig? FindServerPeer(ActivationCodeRecord record)
+    {
+        var tunnelIp = AddressIp(record.TunnelAddress);
+        return ParseServerPeers(_serverConfigPath.Text).FirstOrDefault(p =>
+            (!string.IsNullOrWhiteSpace(record.ProfileName) && p.Name.Contains(record.ProfileName, StringComparison.OrdinalIgnoreCase)) ||
+            (!string.IsNullOrWhiteSpace(tunnelIp) && p.AllowedIps.Contains(tunnelIp, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static ActivationStore LoadActivationStore(string path)
+    {
+        return JsonSerializer.Deserialize<ActivationStore>(File.ReadAllText(path, Encoding.UTF8), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new ActivationStore();
+    }
+
+    private static void SaveActivationStore(string path, ActivationStore store)
+    {
+        File.WriteAllText(path, JsonSerializer.Serialize(store, new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
     }
 
     private static void WriteJson(HttpListenerContext context, int statusCode, object payload)
@@ -1044,6 +1456,11 @@ internal sealed class MainForm : Form
     private static string NormalizeCode(string code)
     {
         return new string(code.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    }
+
+    private static string NormalizeRole(string role)
+    {
+        return role.Equals("admin", StringComparison.OrdinalIgnoreCase) ? "admin" : "client";
     }
 
     private static string NewToken()
@@ -1111,6 +1528,43 @@ internal sealed class MainForm : Form
             }
         }
         return map;
+    }
+
+    private static List<ServerPeerConfig> ParseServerPeers(string configPath)
+    {
+        var peers = new List<ServerPeerConfig>();
+        if (!File.Exists(configPath)) return peers;
+        string? pendingName = null;
+        ServerPeerConfig? current = null;
+        foreach (var raw in File.ReadLines(configPath))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith("#"))
+            {
+                pendingName = line.TrimStart('#').Trim();
+                continue;
+            }
+            if (line.Equals("[Peer]", StringComparison.OrdinalIgnoreCase))
+            {
+                if (current is not null && !string.IsNullOrWhiteSpace(current.PublicKey)) peers.Add(current);
+                current = new ServerPeerConfig { Name = pendingName ?? "" };
+                pendingName = null;
+                continue;
+            }
+            if (current is null) continue;
+            if (line.StartsWith("PublicKey", StringComparison.OrdinalIgnoreCase))
+                current.PublicKey = line.Split('=', 2)[1].Trim();
+            else if (line.StartsWith("AllowedIPs", StringComparison.OrdinalIgnoreCase))
+                current.AllowedIps = line.Split('=', 2)[1].Trim();
+        }
+        if (current is not null && !string.IsNullOrWhiteSpace(current.PublicKey)) peers.Add(current);
+        return peers;
+    }
+
+    private static string AddressIp(string address)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return "";
+        return address.Split('/')[0].Split(',')[0].Trim();
     }
 
     private static string FormatHandshake(long unix)

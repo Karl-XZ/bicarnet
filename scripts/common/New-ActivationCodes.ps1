@@ -1,6 +1,9 @@
 param(
   [int]$Count = 20,
   [string]$OutputDir = ".\runtime\activation",
+  [ValidateSet("client", "admin")]
+  [string]$Role = "client",
+  [switch]$Append,
   [switch]$Force
 )
 
@@ -39,11 +42,20 @@ function Get-Sha256([string]$Value) {
 
 $storePath = Join-Path $OutputDir "activation-codes.json"
 $plainPath = Join-Path $OutputDir "activation-codes-plain.txt"
-if (!$Force -and ((Test-Path $storePath) -or (Test-Path $plainPath))) {
+if (!$Append -and !$Force -and ((Test-Path $storePath) -or (Test-Path $plainPath))) {
   throw "Activation code files already exist. Use -Force to replace: $OutputDir"
 }
 
 New-Item -ItemType Directory -Force $OutputDir | Out-Null
+
+$existingStore = $null
+$existingPlain = @()
+if ($Append -and (Test-Path $storePath)) {
+  $existingStore = Get-Content $storePath -Raw | ConvertFrom-Json
+}
+if ($Append -and (Test-Path $plainPath)) {
+  $existingPlain = Get-Content $plainPath
+}
 
 $codes = New-Object System.Collections.Generic.HashSet[string]
 while ($codes.Count -lt $Count) {
@@ -55,29 +67,47 @@ $records = foreach ($code in $codes) {
   [ordered]@{
     codeHash = Get-Sha256 $normalized
     codeSuffix = $normalized.Substring([Math]::Max(0, $normalized.Length - 4))
+    role = $Role
     redeemed = $false
     deviceIdHash = ""
     deviceName = ""
     platform = ""
+    profileName = ""
+    account = ""
+    tunnelAddress = ""
     activatedAt = ""
     tokenHash = ""
+    blocked = $false
+    blockedAt = ""
+    blockReason = ""
   }
+}
+
+$allRecords = @($records)
+if ($existingStore -and $existingStore.codes) {
+  $allRecords = @($existingStore.codes) + @($records)
 }
 
 $store = [ordered]@{
   version = 1
   generatedAt = (Get-Date).ToString("o")
-  codes = @($records)
+  codes = @($allRecords)
 }
 
 ($store | ConvertTo-Json -Depth 6) | Set-Content -Encoding utf8 $storePath
-@(
+$plainBlock = @(
   "# bicarnet one-time activation codes"
   "# Generated: $((Get-Date).ToString("o"))"
   "# Each code can be redeemed once. Do not commit or share this whole file."
+  "# Role: $Role"
   ""
   $codes
-) | Set-Content -Encoding utf8 $plainPath
+)
+if ($Append -and $existingPlain.Count -gt 0) {
+  @($existingPlain + "" + $plainBlock) | Set-Content -Encoding utf8 $plainPath
+} else {
+  $plainBlock | Set-Content -Encoding utf8 $plainPath
+}
 
 Write-Host "Activation codes generated:"
 Write-Host "  Plain codes: $plainPath"
