@@ -20,5 +20,9 @@ $activationStore = ".\runtime\activation\activation-codes.json"
 if (Test-Path $activationStore) {
   Copy-Item $activationStore (Join-Path $Output "activation-codes.json") -Force
 }
+$activationPlain = ".\runtime\activation\activation-codes-plain.txt"
+if (Test-Path $activationPlain) {
+  Copy-Item $activationPlain (Join-Path $Output "activation-codes-plain.txt") -Force
+}
 
 Write-Host "Windows client built: $Output\bicarnet.exe"

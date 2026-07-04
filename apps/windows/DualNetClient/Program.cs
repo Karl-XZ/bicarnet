@@ -132,6 +132,40 @@ internal sealed class AdminDevicesResponse
     public List<AdminDeviceRecord> Devices { get; set; } = new();
 }
 
+internal sealed class AdminCodeRecord
+{
+    public string Code { get; set; } = "";
+    public string CodeSuffix { get; set; } = "";
+    public string Role { get; set; } = "client";
+    public bool Redeemed { get; set; }
+    public bool Blocked { get; set; }
+    public string DeviceName { get; set; } = "";
+    public string Platform { get; set; } = "";
+    public string ProfileName { get; set; } = "";
+    public string Account { get; set; } = "";
+    public string TunnelAddress { get; set; } = "";
+    public string ActivatedAt { get; set; } = "";
+}
+
+internal sealed class AdminCodesResponse
+{
+    public string GeneratedAt { get; set; } = DateTimeOffset.Now.ToString("O");
+    public List<AdminCodeRecord> Codes { get; set; } = new();
+}
+
+internal sealed class AdminCreateCodesRequest
+{
+    public int Count { get; set; } = 1;
+    public string Role { get; set; } = "client";
+}
+
+internal sealed class AdminCreateCodesResponse
+{
+    public bool Ok { get; set; }
+    public string Message { get; set; } = "";
+    public List<string> Codes { get; set; } = new();
+}
+
 internal sealed class AdminActionRequest
 {
     public string DeviceIdHash { get; set; } = "";
@@ -420,6 +454,8 @@ internal sealed class MainForm : Form
         root.Controls.Add(new Label { Text = "管理端", Font = new Font("Microsoft YaHei UI", 22, FontStyle.Bold), Height = 48, Dock = DockStyle.Top });
         var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 48 };
         bar.Controls.Add(PrimaryButton("刷新绑定设备", RefreshAdminDevices, 140, Point.Empty));
+        bar.Controls.Add(OutlineButton("查看激活码", RefreshAdminCodes, 120, Point.Empty));
+        bar.Controls.Add(OutlineButton("新建普通激活码", CreateClientActivationCode, 150, Point.Empty));
         _adminSummary.Text = "尚未刷新";
         _adminSummary.AutoSize = true;
         _adminSummary.Padding = new Padding(12, 9, 0, 0);
@@ -1033,6 +1069,79 @@ internal sealed class MainForm : Form
         }
     }
 
+    private async void RefreshAdminCodes()
+    {
+        try
+        {
+            if (!EnsureActivated()) return;
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+            http.DefaultRequestHeaders.Add("X-Bicarnet-Admin-Token", LoadLocalActivationToken());
+            var json = await http.GetStringAsync(AdminUrl("/admin/codes"));
+            var response = JsonSerializer.Deserialize<AdminCodesResponse>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (response is null) throw new InvalidOperationException("激活码接口返回空数据。");
+            RenderAdminCodes(response);
+        }
+        catch (Exception ex)
+        {
+            _adminDeviceCards.Controls.Clear();
+            _adminSummary.Text = "激活码刷新失败";
+            var card = CardPanel();
+            card.Width = 860;
+            card.Height = 110;
+            card.Controls.Add(new Label { Text = "无法读取激活码列表", Font = new Font("Microsoft YaHei UI", 13, FontStyle.Bold), ForeColor = Red, Location = new Point(16, 14), AutoSize = true });
+            card.Controls.Add(new Label { Text = ex.Message, Font = new Font("Consolas", 9), ForeColor = Slate, Location = new Point(16, 50), Size = new Size(790, 40) });
+            _adminDeviceCards.Controls.Add(card);
+        }
+    }
+
+    private void RenderAdminCodes(AdminCodesResponse response)
+    {
+        _adminDeviceCards.Controls.Clear();
+        var unused = response.Codes.Count(c => !c.Redeemed);
+        var admin = response.Codes.Count(c => c.Role == "admin");
+        _adminSummary.Text = $"激活码 {response.Codes.Count} 个，未使用 {unused} 个，管理员码 {admin} 个";
+        foreach (var code in response.Codes.OrderBy(c => c.Role).ThenBy(c => c.Redeemed).ThenBy(c => c.CodeSuffix))
+            _adminDeviceCards.Controls.Add(AdminCodeCard(code));
+    }
+
+    private static Panel AdminCodeCard(AdminCodeRecord c)
+    {
+        var card = CardPanel();
+        card.Width = 880;
+        card.Height = 116;
+        card.Margin = new Padding(0, 0, 0, 10);
+        var color = c.Blocked ? Red : c.Redeemed ? Green : Slate;
+        card.Controls.Add(new Label { Text = c.Role == "admin" ? "管理员码" : c.Redeemed ? "已绑定" : "未使用", BackColor = color, ForeColor = Color.White, TextAlign = ContentAlignment.MiddleCenter, Location = new Point(16, 16), Size = new Size(84, 26) });
+        card.Controls.Add(new Label { Text = string.IsNullOrWhiteSpace(c.Code) ? $"尾号 {c.CodeSuffix}" : c.Code, Font = new Font("Consolas", 12, FontStyle.Bold), ForeColor = Color.FromArgb(15, 23, 42), Location = new Point(116, 14), Size = new Size(520, 28) });
+        var binding = c.Redeemed ? $"{c.DeviceName} / {c.ProfileName} / {c.Account}" : "尚未绑定设备";
+        card.Controls.Add(new Label { Text = $"绑定：{binding}", Font = new Font("Microsoft YaHei UI", 9), ForeColor = Slate, Location = new Point(116, 46), Size = new Size(720, 22) });
+        card.Controls.Add(new Label { Text = $"平台：{c.Platform}    地址：{c.TunnelAddress}    激活：{c.ActivatedAt}", Font = new Font("Microsoft YaHei UI", 9), ForeColor = Slate, Location = new Point(116, 70), Size = new Size(720, 22) });
+        return card;
+    }
+
+    private async void CreateClientActivationCode()
+    {
+        try
+        {
+            if (!EnsureActivated()) return;
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+            http.DefaultRequestHeaders.Add("X-Bicarnet-Admin-Token", LoadLocalActivationToken());
+            var body = JsonSerializer.Serialize(new AdminCreateCodesRequest { Count = 1, Role = "client" });
+            using var content = new StringContent(body, Encoding.UTF8, "application/json");
+            using var response = await http.PostAsync(AdminUrl("/admin/codes/create"), content);
+            var text = await response.Content.ReadAsStringAsync();
+            var result = JsonSerializer.Deserialize<AdminCreateCodesResponse>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (!response.IsSuccessStatusCode || result is null || !result.Ok)
+                throw new InvalidOperationException(result?.Message ?? text);
+            MessageBox.Show(string.Join(Environment.NewLine, result.Codes), "新建普通激活码", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            RefreshAdminCodes();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "新建激活码失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
     private string LoadLocalActivationToken()
     {
         var path = GetLocalActivationPath();
@@ -1174,6 +1283,16 @@ internal sealed class MainForm : Form
                 HandleAdminActionRequest(context, false);
                 return;
             }
+            if (path.Equals("/admin/codes", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleAdminCodesRequest(context);
+                return;
+            }
+            if (path.Equals("/admin/codes/create", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleAdminCreateCodesRequest(context);
+                return;
+            }
 
             if (!path.Equals("/status", StringComparison.OrdinalIgnoreCase))
             {
@@ -1279,6 +1398,56 @@ internal sealed class MainForm : Form
         WriteJson(context, 200, BuildAdminDevicesResponse());
     }
 
+    private void HandleAdminCodesRequest(HttpListenerContext context)
+    {
+        if (!IsAdminRequest(context))
+        {
+            WriteJson(context, 403, new { ok = false, message = "Admin token required." });
+            return;
+        }
+        WriteJson(context, 200, BuildAdminCodesResponse());
+    }
+
+    private void HandleAdminCreateCodesRequest(HttpListenerContext context)
+    {
+        if (!context.Request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase))
+        {
+            WriteJson(context, 405, new AdminCreateCodesResponse { Ok = false, Message = "POST required." });
+            return;
+        }
+        if (!IsAdminRequest(context))
+        {
+            WriteJson(context, 403, new AdminCreateCodesResponse { Ok = false, Message = "Admin token required." });
+            return;
+        }
+
+        var body = new StreamReader(context.Request.InputStream, context.Request.ContentEncoding ?? Encoding.UTF8).ReadToEnd();
+        var request = JsonSerializer.Deserialize<AdminCreateCodesRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new AdminCreateCodesRequest();
+        var count = Math.Clamp(request.Count, 1, 20);
+        var role = NormalizeRole(request.Role);
+        if (role == "admin")
+        {
+            WriteJson(context, 400, new AdminCreateCodesResponse { Ok = false, Message = "管理端只允许从这里新建普通激活码。" });
+            return;
+        }
+
+        lock (typeof(MainForm))
+        {
+            var storePath = GetActivationStorePath();
+            var store = LoadActivationStore(storePath);
+            var codes = new List<string>();
+            for (var i = 0; i < count; i++)
+            {
+                var code = NewActivationCode();
+                codes.Add(code);
+                store.Codes.Add(NewActivationCodeRecord(code, "client"));
+            }
+            SaveActivationStore(storePath, store);
+            AppendPlainActivationCodes(codes, "client");
+            WriteJson(context, 200, new AdminCreateCodesResponse { Ok = true, Message = "激活码已创建。", Codes = codes });
+        }
+    }
+
     private void HandleAdminActionRequest(HttpListenerContext context, bool block)
     {
         if (!context.Request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase))
@@ -1372,6 +1541,34 @@ internal sealed class MainForm : Form
         return new AdminDevicesResponse { Devices = devices.OrderBy(d => d.Role).ThenBy(d => d.Blocked).ThenBy(d => d.DeviceName).ToList() };
     }
 
+    private AdminCodesResponse BuildAdminCodesResponse()
+    {
+        var store = LoadActivationStore(GetActivationStorePath());
+        var plainCodes = ReadPlainActivationCodes();
+        var codes = store.Codes.Select(record =>
+        {
+            var normalizedRole = NormalizeRole(record.Role);
+            var code = plainCodes.FirstOrDefault(c =>
+                NormalizeRole(c.Role) == normalizedRole &&
+                Sha256(NormalizeCode(c.Code)).Equals(record.CodeHash, StringComparison.OrdinalIgnoreCase)).Code ?? "";
+            return new AdminCodeRecord
+            {
+                Code = code,
+                CodeSuffix = record.CodeSuffix,
+                Role = normalizedRole,
+                Redeemed = record.Redeemed,
+                Blocked = record.Blocked,
+                DeviceName = record.DeviceName,
+                Platform = record.Platform,
+                ProfileName = record.ProfileName,
+                Account = record.Account,
+                TunnelAddress = record.TunnelAddress,
+                ActivatedAt = record.ActivatedAt
+            };
+        }).ToList();
+        return new AdminCodesResponse { Codes = codes };
+    }
+
     private DeviceStatusResponse TryBuildDeviceStatus()
     {
         try { return BuildDeviceStatus(); }
@@ -1451,6 +1648,69 @@ internal sealed class MainForm : Form
         var local = Path.Combine(AppContext.BaseDirectory, "activation-codes.json");
         if (File.Exists(local)) return local;
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "bicarnet", "activation-codes.json");
+    }
+
+    private static string GetActivationPlainPath()
+    {
+        var local = Path.Combine(AppContext.BaseDirectory, "activation-codes-plain.txt");
+        if (File.Exists(local)) return local;
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "bicarnet", "activation-codes-plain.txt");
+    }
+
+    private static string NewActivationCode()
+    {
+        const string alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        var bytes = RandomNumberGenerator.GetBytes(12);
+        var chars = bytes.Select(b => alphabet[b % alphabet.Length]).ToArray();
+        var raw = new string(chars);
+        return $"BICAR-{raw[..4]}-{raw.Substring(4, 4)}-{raw.Substring(8, 4)}";
+    }
+
+    private static ActivationCodeRecord NewActivationCodeRecord(string code, string role)
+    {
+        var normalized = NormalizeCode(code);
+        return new ActivationCodeRecord
+        {
+            CodeHash = Sha256(normalized),
+            CodeSuffix = normalized.Substring(Math.Max(0, normalized.Length - 4)),
+            Role = NormalizeRole(role)
+        };
+    }
+
+    private static List<(string Code, string Role)> ReadPlainActivationCodes()
+    {
+        var result = new List<(string Code, string Role)>();
+        var path = GetActivationPlainPath();
+        if (!File.Exists(path)) return result;
+        var role = "client";
+        foreach (var raw in File.ReadLines(path, Encoding.UTF8))
+        {
+            var line = raw.Trim();
+            if (line.StartsWith("# Role:", StringComparison.OrdinalIgnoreCase))
+            {
+                role = NormalizeRole(line.Split(':', 2)[1].Trim());
+                continue;
+            }
+            if (line.StartsWith("#") || string.IsNullOrWhiteSpace(line)) continue;
+            if (NormalizeCode(line).Length > 0)
+                result.Add((line, role));
+        }
+        return result;
+    }
+
+    private static void AppendPlainActivationCodes(IEnumerable<string> codes, string role)
+    {
+        var path = GetActivationPlainPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var lines = new List<string>
+        {
+            "",
+            "# Generated by admin UI: " + DateTimeOffset.Now.ToString("O"),
+            "# Role: " + NormalizeRole(role),
+            ""
+        };
+        lines.AddRange(codes);
+        File.AppendAllLines(path, lines, Encoding.UTF8);
     }
 
     private static string NormalizeCode(string code)
