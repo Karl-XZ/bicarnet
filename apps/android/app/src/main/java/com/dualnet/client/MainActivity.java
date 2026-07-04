@@ -568,7 +568,38 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void updateTunnelUi(Tunnel.State state) {
+        if (state == Tunnel.State.UP) {
+            tunnelUp = true;
+            connectButton.setEnabled(true);
+            setStateCard("已启动", "正在确认服务端连通性", "如果长时间失败，请切换局域网/公网节点。", BLUE);
+            refreshDevices();
+        } else {
+            tunnelUp = false;
+            connectButton.setEnabled(true);
+            setStateCard("未连接", "隧道已断开", "需要使用时再次点击“连接”。", MUTED);
+            setDevicesMessage("尚未刷新", "连接成功后会自动刷新，也可以手动点击“刷新”。", MUTED);
+        }
+    }
+
     private void setTunnelState(Tunnel.State state) throws Exception {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            new Thread(() -> {
+                try {
+                    backend.setState(tunnel, state, state == Tunnel.State.UP ? config : null);
+                    runOnUiThread(() -> updateTunnelUi(state));
+                    log("状态切换为 " + state);
+                } catch (Exception ex) {
+                    runOnUiThread(() -> {
+                        connectButton.setEnabled(true);
+                        setStateCard("连接失败", state == Tunnel.State.UP ? "无法启动 VPN" : "无法断开 VPN", safeMessage(ex), RED);
+                        log("VPN 状态切换失败: " + safeMessage(ex));
+                        logStack(ex);
+                    });
+                }
+            }).start();
+            return;
+        }
         backend.setState(tunnel, state, state == Tunnel.State.UP ? config : null);
         if (state == Tunnel.State.UP) {
             tunnelUp = true;
