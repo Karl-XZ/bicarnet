@@ -53,6 +53,11 @@ internal sealed class MainForm : Form
 {
     private const int StatusApiPort = 8787;
     private const string DefaultServerTunnel = "dualnet-server";
+#if BICARNET_CLIENT_ONLY
+    private static readonly bool ClientOnly = true;
+#else
+    private static readonly bool ClientOnly = false;
+#endif
     private static readonly Color Blue = Color.FromArgb(37, 99, 235);
     private static readonly Color Green = Color.FromArgb(22, 163, 74);
     private static readonly Color Red = Color.FromArgb(220, 38, 38);
@@ -142,9 +147,10 @@ internal sealed class MainForm : Form
             Dock = DockStyle.Top
         });
 
-        var cards = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, RowCount = 1, Height = 230, Padding = new Padding(0, 14, 0, 0) };
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        var cards = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = ClientOnly ? 1 : 2, RowCount = 1, Height = 230, Padding = new Padding(0, 14, 0, 0) };
+        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, ClientOnly ? 100 : 50));
+        if (!ClientOnly)
+            cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
         root.Controls.Add(cards);
 
         cards.Controls.Add(BuildRoleCard(
@@ -168,6 +174,9 @@ internal sealed class MainForm : Form
             StartServer,
             "停止服务端",
             StopServer), 1, 0);
+
+        if (ClientOnly && cards.Controls.Count > 1)
+            cards.Controls.RemoveAt(cards.Controls.Count - 1);
 
         var tips = CardPanel();
         tips.Dock = DockStyle.Top;
@@ -237,6 +246,9 @@ internal sealed class MainForm : Form
         bar.Controls.Add(OutlineButton("从本机读取", RefreshDevicesFromLocalServer, 120, Point.Empty));
         bar.Controls.Add(OutlineButton("从状态接口读取", RefreshDevicesFromStatusApi, 140, Point.Empty));
         _deviceSummary.Text = "尚未刷新";
+        if (ClientOnly && bar.Controls.Count > 1)
+            bar.Controls.RemoveAt(1);
+
         _deviceSummary.AutoSize = true;
         _deviceSummary.Padding = new Padding(12, 9, 0, 0);
         bar.Controls.Add(_deviceSummary);
@@ -269,6 +281,16 @@ internal sealed class MainForm : Form
         AddRow(grid, "连接端配置", _clientConfigPath, OutlineButton("选择", BrowseConfig, 80, Point.Empty));
         AddRow(grid, "服务端配置", _serverConfigPath, OutlineButton("选择", BrowseServerConfig, 80, Point.Empty));
         AddRow(grid, "设备接口", _statusApi, null);
+
+        if (ClientOnly)
+        {
+            for (var i = grid.Controls.Count - 1; i >= 0; i--)
+            {
+                var position = grid.GetPositionFromControl(grid.Controls[i]);
+                if (position.Row == 2)
+                    grid.Controls.RemoveAt(i);
+            }
+        }
 
         _diagnostics.Multiline = true;
         _diagnostics.ReadOnly = true;
@@ -404,7 +426,8 @@ internal sealed class MainForm : Form
     private void RefreshAllStatus()
     {
         RefreshClientStatus();
-        RefreshServerStatus();
+        if (!ClientOnly)
+            RefreshServerStatus();
     }
 
     private void RefreshClientStatus()
@@ -509,6 +532,12 @@ internal sealed class MainForm : Form
 
     private void RefreshDevicesFromBestSource()
     {
+        if (ClientOnly)
+        {
+            RefreshDevicesFromStatusApi();
+            return;
+        }
+
         if (GetServiceState(DefaultServerTunnel) == "运行中")
             RefreshDevicesFromLocalServer();
         else
@@ -524,6 +553,7 @@ internal sealed class MainForm : Form
 
     private void StartStatusApiIfServerIsRunning()
     {
+        if (ClientOnly) return;
         if (GetServiceState(DefaultServerTunnel) != "运行中") return;
         StartStatusApi();
     }
