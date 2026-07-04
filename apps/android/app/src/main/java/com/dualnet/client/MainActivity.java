@@ -2,6 +2,7 @@ package com.dualnet.client;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -10,9 +11,12 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.Window;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -50,10 +54,28 @@ public class MainActivity extends Activity {
     private static final int BLUE = Color.rgb(37, 99, 235);
     private static final int GREEN = Color.rgb(22, 163, 74);
     private static final int RED = Color.rgb(220, 38, 38);
+    private static final String PREFS = "bicarnet-settings";
+    private static final String PREF_SPLIT_TUNNEL = "splitTunnelEnabled";
+    private static final String PREF_PUBLIC_ENDPOINT = "publicEndpointOverride";
+    private static final String[] DOMESTIC_APP_PACKAGES = new String[]{
+            "com.tencent.mm",
+            "com.tencent.mobileqq",
+            "com.tencent.tim",
+            "com.tencent.wework",
+            "com.eg.android.AlipayGphone",
+            "com.taobao.taobao",
+            "com.jingdong.app.mall",
+            "com.sina.weibo",
+            "com.ss.android.ugc.aweme",
+            "com.ss.android.article.news",
+            "com.kuaishou.nebula",
+            "com.smile.gifmaker"
+    };
 
     private SimpleTunnel tunnel = new SimpleTunnel("dualnet-client-android");
     private Backend backend;
     private Config config;
+    private SharedPreferences prefs;
 
     private TextView statusBadge;
     private TextView statusTitle;
@@ -63,8 +85,11 @@ public class MainActivity extends Activity {
     private TextView diagnostics;
     private Button connectButton;
     private Button disconnectButton;
+    private EditText serverEndpointInput;
+    private CheckBox splitTunnelCheck;
 
     private String statusApiUrl = "http://10.77.0.1:8787/status";
+    private String defaultPublicEndpoint = "";
     private String publicEndpoint = "";
     private String lanEndpoint = "";
     private String activeEndpoint = "";
@@ -74,6 +99,7 @@ public class MainActivity extends Activity {
     private String localDeviceName = "Android";
     private String localTunnelAddress = "";
     private String routeModeText = "仅设备互联";
+    private boolean splitTunnelEnabled = true;
     private boolean internetExitEnabled;
     private boolean tunnelUp;
 
@@ -84,6 +110,8 @@ public class MainActivity extends Activity {
         window.setStatusBarColor(BG);
         window.setNavigationBarColor(BG);
         backend = new GoBackend(this);
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        splitTunnelEnabled = prefs.getBoolean(PREF_SPLIT_TUNNEL, true);
         localDeviceName = getDeviceDisplayName();
         buildUi();
         loadProfile();
@@ -152,8 +180,43 @@ public class MainActivity extends Activity {
         nodeText.setPadding(0, dp(8), 0, dp(14));
         nodeCard.addView(nodeText);
 
+        nodeCard.addView(text("服务端公网 IP / 域名", 14, TEXT, true));
+        serverEndpointInput = new EditText(this);
+        serverEndpointInput.setSingleLine(true);
+        serverEndpointInput.setTextSize(14);
+        serverEndpointInput.setTextColor(TEXT);
+        serverEndpointInput.setHint("例如 1.2.3.4 或 vpn.example.com");
+        serverEndpointInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        serverEndpointInput.setPadding(dp(12), 0, dp(12), 0);
+        serverEndpointInput.setBackground(rounded(Color.rgb(248, 250, 252), LINE, 10));
+        LinearLayout.LayoutParams endpointInputLp = new LinearLayout.LayoutParams(-1, dp(48));
+        endpointInputLp.setMargins(0, dp(8), 0, dp(10));
+        nodeCard.addView(serverEndpointInput, endpointInputLp);
+
+        LinearLayout endpointButtons = new LinearLayout(this);
+        endpointButtons.setOrientation(LinearLayout.HORIZONTAL);
+        Button applyEndpoint = secondary("应用服务端");
+        applyEndpoint.setOnClickListener(v -> applyServerEndpointOverride());
+        endpointButtons.addView(applyEndpoint, new LinearLayout.LayoutParams(0, dp(48), 1));
+        Button resetEndpoint = secondary("恢复默认");
+        resetEndpoint.setOnClickListener(v -> resetServerEndpoint());
+        LinearLayout.LayoutParams resetEndpointLp = new LinearLayout.LayoutParams(0, dp(48), 1);
+        resetEndpointLp.setMargins(dp(12), 0, 0, 0);
+        endpointButtons.addView(resetEndpoint, resetEndpointLp);
+        nodeCard.addView(endpointButtons);
+
+        splitTunnelCheck = new CheckBox(this);
+        splitTunnelCheck.setText("智能分流：微信、QQ 等国内应用不走代理");
+        splitTunnelCheck.setTextSize(14);
+        splitTunnelCheck.setTextColor(TEXT);
+        splitTunnelCheck.setChecked(splitTunnelEnabled);
+        splitTunnelCheck.setPadding(0, dp(12), 0, dp(4));
+        splitTunnelCheck.setOnCheckedChangeListener((buttonView, isChecked) -> applySplitTunnelSetting(isChecked));
+        nodeCard.addView(splitTunnelCheck);
+
         LinearLayout nodeButtons = new LinearLayout(this);
         nodeButtons.setOrientation(LinearLayout.HORIZONTAL);
+        nodeButtons.setPadding(0, dp(6), 0, 0);
         Button lan = secondary("局域网节点");
         lan.setOnClickListener(v -> selectEndpoint(lanEndpoint));
         nodeButtons.addView(lan, new LinearLayout.LayoutParams(0, dp(52), 1));
@@ -300,11 +363,93 @@ public class MainActivity extends Activity {
     private void updateRouteMode(String configText) {
         String allowedIps = extractPeerAllowedIps(configText);
         internetExitEnabled = allowedIps.contains("0.0.0.0/0") || allowedIps.contains("::/0");
-        routeModeText = internetExitEnabled ? "互联网出口（IPv4 全局）" : "仅设备互联（不会代理 Google）";
+        if (internetExitEnabled) {
+            routeModeText = splitTunnelEnabled ? "互联网出口 + 智能分流" : "互联网出口（全局代理）";
+        } else {
+            routeModeText = "仅设备互联（不会代理 Google）";
+        }
     }
 
     private void appendRouteMode() {
         if (nodeText != null) nodeText.append("\n流量模式：" + routeModeText);
+    }
+
+    private String extractEndpointPort(String endpointValue) {
+        int colon = endpointValue == null ? -1 : endpointValue.lastIndexOf(':');
+        if (colon >= 0 && colon + 1 < endpointValue.length()) return endpointValue.substring(colon + 1);
+        return "51820";
+    }
+
+    private String normalizeEndpoint(String value, String fallbackEndpoint) {
+        String endpointValue = value == null ? "" : value.trim();
+        if (endpointValue.startsWith("http://")) endpointValue = endpointValue.substring(7);
+        if (endpointValue.startsWith("https://")) endpointValue = endpointValue.substring(8);
+        int slash = endpointValue.indexOf('/');
+        if (slash >= 0) endpointValue = endpointValue.substring(0, slash);
+        endpointValue = endpointValue.trim();
+        if (endpointValue.length() == 0) return fallbackEndpoint;
+        if (endpointValue.lastIndexOf(':') < 0) {
+            endpointValue = endpointValue + ":" + extractEndpointPort(fallbackEndpoint);
+        }
+        return endpointValue;
+    }
+
+    private String applySplitTunnel(String configText) {
+        String rewritten = configText.replaceAll("(?m)^ExcludedApplications\\s*=\\s*.*\\r?\\n?", "");
+        if (!splitTunnelEnabled) return rewritten;
+        String excluded = "ExcludedApplications = " + String.join(", ", DOMESTIC_APP_PACKAGES);
+        if (rewritten.contains("\n[Peer]")) {
+            return rewritten.replaceFirst("\\n\\[Peer\\]", "\n" + excluded + "\n\n[Peer]");
+        }
+        return rewritten + "\n" + excluded + "\n";
+    }
+
+    private void rebuildConfigAfterSettingChange(String title, String detail) {
+        try {
+            if (baseConfigText.length() > 0) {
+                updateRouteMode(baseConfigText);
+                config = parseConfigForEndpoint(activeEndpoint);
+            }
+            updateNodeText();
+            appendRouteMode();
+            if (tunnelUp) {
+                setTunnelState(Tunnel.State.DOWN);
+                setStateCard("设置已保存", title, "VPN 已断开，请重新点击“连接”让新设置生效。", BLUE);
+            } else {
+                setStateCard("设置已保存", title, detail, BLUE);
+            }
+        } catch (Exception ex) {
+            setStateCard("配置错误", "设置未能生效", safeMessage(ex), RED);
+            log("设置应用失败: " + safeMessage(ex));
+        }
+    }
+
+    private void applySplitTunnelSetting(boolean enabled) {
+        splitTunnelEnabled = enabled;
+        prefs.edit().putBoolean(PREF_SPLIT_TUNNEL, enabled).apply();
+        rebuildConfigAfterSettingChange(
+                enabled ? "智能分流已开启" : "智能分流已关闭",
+                enabled ? "微信、QQ 等国内应用不会走代理。" : "所有流量会按当前 VPN 路由走隧道。");
+        log("智能分流: " + (enabled ? "开启" : "关闭"));
+    }
+
+    private void applyServerEndpointOverride() {
+        String normalized = normalizeEndpoint(serverEndpointInput == null ? "" : serverEndpointInput.getText().toString(), defaultPublicEndpoint);
+        publicEndpoint = normalized;
+        activeEndpoint = publicEndpoint;
+        if (serverEndpointInput != null) serverEndpointInput.setText(publicEndpoint);
+        prefs.edit().putString(PREF_PUBLIC_ENDPOINT, publicEndpoint).apply();
+        rebuildConfigAfterSettingChange("服务端地址已更新", "当前会连接：" + publicEndpoint);
+        log("服务端地址已更新: " + publicEndpoint);
+    }
+
+    private void resetServerEndpoint() {
+        publicEndpoint = defaultPublicEndpoint;
+        activeEndpoint = publicEndpoint;
+        if (serverEndpointInput != null) serverEndpointInput.setText(publicEndpoint);
+        prefs.edit().remove(PREF_PUBLIC_ENDPOINT).apply();
+        rebuildConfigAfterSettingChange("已恢复默认服务端", "当前会连接：" + publicEndpoint);
+        log("服务端地址已恢复默认: " + publicEndpoint);
     }
 
     private void loadProfile() {
@@ -313,10 +458,12 @@ public class MainActivity extends Activity {
             profileName = obj.optString("profileName", profileName);
             profileAccount = obj.optString("account", profileAccount);
             tunnel = new SimpleTunnel(obj.optString("tunnelName", profileName));
-            publicEndpoint = obj.optString("endpoint", "");
+            defaultPublicEndpoint = obj.optString("endpoint", "");
+            publicEndpoint = normalizeEndpoint(prefs.getString(PREF_PUBLIC_ENDPOINT, defaultPublicEndpoint), defaultPublicEndpoint);
             lanEndpoint = obj.optString("lanEndpoint", publicEndpoint);
-            activeEndpoint = lanEndpoint.length() > 0 ? lanEndpoint : publicEndpoint;
+            activeEndpoint = publicEndpoint.length() > 0 ? publicEndpoint : lanEndpoint;
             statusApiUrl = obj.optString("statusApiUrl", statusApiUrl);
+            if (serverEndpointInput != null) serverEndpointInput.setText(publicEndpoint);
             updateNodeText();
             appendRouteMode();
             log("本机设备：" + localDeviceName + "；隧道身份：" + profileName + " / " + profileAccount);
@@ -368,6 +515,7 @@ public class MainActivity extends Activity {
 
     private Config parseConfigForEndpoint(String endpointValue) throws Exception {
         String rewritten = baseConfigText.replaceAll("(?m)^Endpoint\\s*=\\s*.*$", "Endpoint = " + endpointValue);
+        rewritten = applySplitTunnel(rewritten);
         return Config.parse(new java.io.ByteArrayInputStream(rewritten.getBytes(StandardCharsets.UTF_8)));
     }
 
