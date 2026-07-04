@@ -16,4 +16,9 @@ if (Test-Path $legacyExe) {
   Remove-Item $legacyExe -Force
 }
 
+$activationStore = ".\runtime\activation\activation-codes.json"
+if (Test-Path $activationStore) {
+  Copy-Item $activationStore (Join-Path $Output "activation-codes.json") -Force
+}
+
 Write-Host "Windows client built: $Output\bicarnet.exe"

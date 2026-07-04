@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Net;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Win32;
 
 namespace DualNetClient;
 
@@ -47,6 +49,49 @@ internal sealed class DeviceStatusResponse
     public string Server { get; set; } = "dualnet-server";
     public string GeneratedAt { get; set; } = DateTimeOffset.Now.ToString("O");
     public List<PeerStatus> Devices { get; set; } = new();
+}
+
+internal sealed class ActivationRequest
+{
+    public string Code { get; set; } = "";
+    public string DeviceId { get; set; } = "";
+    public string DeviceName { get; set; } = "";
+    public string Platform { get; set; } = "";
+}
+
+internal sealed class ActivationResponse
+{
+    public bool Ok { get; set; }
+    public string Message { get; set; } = "";
+    public string Token { get; set; } = "";
+    public string ActivatedAt { get; set; } = "";
+}
+
+internal sealed class LocalActivation
+{
+    public string DeviceId { get; set; } = "";
+    public string DeviceName { get; set; } = "";
+    public string Platform { get; set; } = "windows";
+    public string Token { get; set; } = "";
+    public string ActivatedAt { get; set; } = "";
+}
+
+internal sealed class ActivationStore
+{
+    public int Version { get; set; } = 1;
+    public List<ActivationCodeRecord> Codes { get; set; } = new();
+}
+
+internal sealed class ActivationCodeRecord
+{
+    public string CodeHash { get; set; } = "";
+    public string CodeSuffix { get; set; } = "";
+    public bool Redeemed { get; set; }
+    public string DeviceIdHash { get; set; } = "";
+    public string DeviceName { get; set; } = "";
+    public string Platform { get; set; } = "";
+    public string ActivatedAt { get; set; } = "";
+    public string TokenHash { get; set; } = "";
 }
 
 internal sealed class MainForm : Form
@@ -469,10 +514,191 @@ internal sealed class MainForm : Form
         _serverHint.Text = hint;
     }
 
+    private bool EnsureActivated()
+    {
+        if (IsActivated()) return true;
+
+        using var dialog = new Form
+        {
+            Text = "bicarnet 激活",
+            Width = 430,
+            Height = 230,
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MaximizeBox = false,
+            MinimizeBox = false
+        };
+        var label = new Label
+        {
+            Text = "首次使用这台电脑需要输入一次性激活码。",
+            Location = new Point(18, 18),
+            Size = new Size(370, 24)
+        };
+        var input = new TextBox
+        {
+            Location = new Point(18, 56),
+            Width = 370,
+            CharacterCasing = CharacterCasing.Upper
+        };
+        var hint = new Label
+        {
+            Text = "激活成功后会绑定当前设备，以后不再要求输入。",
+            Location = new Point(18, 88),
+            Size = new Size(370, 34),
+            ForeColor = Slate
+        };
+        var ok = new Button
+        {
+            Text = "激活",
+            DialogResult = DialogResult.OK,
+            Location = new Point(216, 136),
+            Width = 82
+        };
+        var cancel = new Button
+        {
+            Text = "取消",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(306, 136),
+            Width = 82
+        };
+        dialog.Controls.AddRange(new Control[] { label, input, hint, ok, cancel });
+        dialog.AcceptButton = ok;
+        dialog.CancelButton = cancel;
+
+        if (dialog.ShowDialog(this) != DialogResult.OK) return false;
+        var code = input.Text.Trim();
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            MessageBox.Show("请输入激活码。", "bicarnet 激活", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return false;
+        }
+
+        try
+        {
+            var response = ClaimActivationAsync(code).GetAwaiter().GetResult();
+            if (!response.Ok) throw new InvalidOperationException(response.Message);
+            SaveLocalActivation(new LocalActivation
+            {
+                DeviceId = GetDeviceId(),
+                DeviceName = Environment.MachineName,
+                Platform = "windows",
+                Token = response.Token,
+                ActivatedAt = string.IsNullOrWhiteSpace(response.ActivatedAt) ? DateTimeOffset.Now.ToString("O") : response.ActivatedAt
+            });
+            Log("设备已激活。");
+            MessageBox.Show("激活成功，这台电脑以后不需要再次输入激活码。", "bicarnet 激活", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("激活失败：" + ex.Message + "\n\n请确认服务端已启动状态接口，并且当前网络可访问 TCP 8787。", "bicarnet 激活失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            Log("激活失败: " + ex.Message);
+            return false;
+        }
+    }
+
+    private bool IsActivated()
+    {
+        try
+        {
+            var path = GetLocalActivationPath();
+            if (!File.Exists(path)) return false;
+            var activation = JsonSerializer.Deserialize<LocalActivation>(File.ReadAllText(path, Encoding.UTF8), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            return activation is not null
+                && activation.DeviceId == GetDeviceId()
+                && activation.Platform.Equals("windows", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(activation.Token);
+        }
+        catch { return false; }
+    }
+
+    private async Task<ActivationResponse> ClaimActivationAsync(string code)
+    {
+        var request = new ActivationRequest
+        {
+            Code = code,
+            DeviceId = GetDeviceId(),
+            DeviceName = Environment.MachineName,
+            Platform = "windows"
+        };
+        var body = JsonSerializer.Serialize(request);
+        Exception? last = null;
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+        foreach (var url in ActivationUrlCandidates())
+        {
+            try
+            {
+                using var content = new StringContent(body, Encoding.UTF8, "application/json");
+                using var response = await http.PostAsync(url, content);
+                var text = await response.Content.ReadAsStringAsync();
+                var result = JsonSerializer.Deserialize<ActivationResponse>(text, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (!response.IsSuccessStatusCode)
+                    throw new InvalidOperationException(result?.Message ?? $"HTTP {(int)response.StatusCode}: {text}");
+                return result ?? throw new InvalidOperationException("激活接口返回空数据。");
+            }
+            catch (Exception ex)
+            {
+                last = ex;
+                Log($"激活接口不可达 {url}: {ex.Message}");
+            }
+        }
+        throw last ?? new InvalidOperationException("没有可用的激活接口。");
+    }
+
+    private IEnumerable<string> ActivationUrlCandidates()
+    {
+        var endpoints = new[] { _profile.Endpoint, _profile.LanEndpoint };
+        foreach (var endpoint in endpoints)
+        {
+            var host = EndpointHost(endpoint);
+            if (!string.IsNullOrWhiteSpace(host))
+                yield return $"http://{host}:{StatusApiPort}/activate";
+        }
+        if (Uri.TryCreate(_statusApi.Text.Trim(), UriKind.Absolute, out var statusUri))
+            yield return new UriBuilder(statusUri) { Path = "activate", Query = "" }.Uri.ToString();
+    }
+
+    private static string EndpointHost(string endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint)) return "";
+        var value = endpoint.Trim();
+        if (value.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) value = value[7..];
+        if (value.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) value = value[8..];
+        var slash = value.IndexOf('/');
+        if (slash >= 0) value = value[..slash];
+        var colon = value.LastIndexOf(':');
+        if (colon > 0) value = value[..colon];
+        return value.Trim();
+    }
+
+    private static void SaveLocalActivation(LocalActivation activation)
+    {
+        var path = GetLocalActivationPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, JsonSerializer.Serialize(activation, new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
+    }
+
+    private static string GetLocalActivationPath()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "bicarnet", "activation.json");
+    }
+
+    private static string GetDeviceId()
+    {
+        try
+        {
+            var machineGuid = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Cryptography", "MachineGuid", "")?.ToString();
+            if (!string.IsNullOrWhiteSpace(machineGuid)) return "windows-" + Sha256(machineGuid);
+        }
+        catch { }
+        return "windows-" + Sha256(Environment.MachineName);
+    }
+
     private void ConnectClient()
     {
         SetClientMessage("正在连接", "正在安装并启动连接端", "通常需要几秒钟，请稍候。", Blue);
         Application.DoEvents();
+        if (!EnsureActivated()) return;
         if (!ValidateAdminAndWireGuard()) return;
         if (!File.Exists(_profile.ConfigPath))
         {
@@ -714,7 +940,14 @@ internal sealed class MainForm : Form
     {
         try
         {
-            if (!context.Request.Url?.AbsolutePath.Equals("/status", StringComparison.OrdinalIgnoreCase) ?? true)
+            var path = context.Request.Url?.AbsolutePath ?? "";
+            if (path.Equals("/activate", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleActivationRequest(context);
+                return;
+            }
+
+            if (!path.Equals("/status", StringComparison.OrdinalIgnoreCase))
             {
                 context.Response.StatusCode = 404;
                 context.Response.Close();
@@ -735,6 +968,94 @@ internal sealed class MainForm : Form
             context.Response.OutputStream.Write(bytes, 0, bytes.Length);
             context.Response.Close();
         }
+    }
+
+    private void HandleActivationRequest(HttpListenerContext context)
+    {
+        if (!context.Request.HttpMethod.Equals("POST", StringComparison.OrdinalIgnoreCase))
+        {
+            WriteJson(context, 405, new ActivationResponse { Ok = false, Message = "Activation requires POST." });
+            return;
+        }
+
+        var body = new StreamReader(context.Request.InputStream, context.Request.ContentEncoding ?? Encoding.UTF8).ReadToEnd();
+        var request = JsonSerializer.Deserialize<ActivationRequest>(body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (request is null || string.IsNullOrWhiteSpace(request.Code) || string.IsNullOrWhiteSpace(request.DeviceId))
+        {
+            WriteJson(context, 400, new ActivationResponse { Ok = false, Message = "激活码或设备信息为空。" });
+            return;
+        }
+
+        var storePath = GetActivationStorePath();
+        if (!File.Exists(storePath))
+        {
+            WriteJson(context, 503, new ActivationResponse { Ok = false, Message = "服务端未安装激活码库 activation-codes.json。" });
+            return;
+        }
+
+        lock (typeof(MainForm))
+        {
+            var store = JsonSerializer.Deserialize<ActivationStore>(File.ReadAllText(storePath, Encoding.UTF8), new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new ActivationStore();
+            var codeHash = Sha256(NormalizeCode(request.Code));
+            var deviceHash = Sha256(request.DeviceId);
+            var record = store.Codes.FirstOrDefault(c => c.CodeHash.Equals(codeHash, StringComparison.OrdinalIgnoreCase));
+            if (record is null)
+            {
+                WriteJson(context, 403, new ActivationResponse { Ok = false, Message = "激活码无效。" });
+                return;
+            }
+
+            if (record.Redeemed && !record.DeviceIdHash.Equals(deviceHash, StringComparison.OrdinalIgnoreCase))
+            {
+                WriteJson(context, 409, new ActivationResponse { Ok = false, Message = "这个激活码已经被其他设备使用。" });
+                return;
+            }
+
+            var token = NewToken();
+            var activatedAt = DateTimeOffset.Now.ToString("O");
+            record.Redeemed = true;
+            record.DeviceIdHash = deviceHash;
+            record.DeviceName = request.DeviceName;
+            record.Platform = request.Platform;
+            record.ActivatedAt = activatedAt;
+            record.TokenHash = Sha256(token);
+            File.WriteAllText(storePath, JsonSerializer.Serialize(store, new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
+            WriteJson(context, 200, new ActivationResponse { Ok = true, Message = "激活成功。", Token = token, ActivatedAt = activatedAt });
+        }
+    }
+
+    private static void WriteJson(HttpListenerContext context, int statusCode, object payload)
+    {
+        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "application/json; charset=utf-8";
+        context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+        context.Response.OutputStream.Write(bytes, 0, bytes.Length);
+        context.Response.Close();
+    }
+
+    private static string GetActivationStorePath()
+    {
+        var local = Path.Combine(AppContext.BaseDirectory, "activation-codes.json");
+        if (File.Exists(local)) return local;
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "bicarnet", "activation-codes.json");
+    }
+
+    private static string NormalizeCode(string code)
+    {
+        return new string(code.Where(char.IsLetterOrDigit).Select(char.ToUpperInvariant).ToArray());
+    }
+
+    private static string NewToken()
+    {
+        var bytes = RandomNumberGenerator.GetBytes(32);
+        return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+
+    private static string Sha256(string value)
+    {
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(value));
+        return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
     private DeviceStatusResponse BuildDeviceStatus()

@@ -11,6 +11,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.Window;
@@ -39,6 +40,7 @@ import java.io.StringWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.LocalTime;
 import java.util.Arrays;
 import java.util.Locale;
@@ -57,6 +59,9 @@ public class MainActivity extends Activity {
     private static final String PREFS = "bicarnet-settings";
     private static final String PREF_SPLIT_TUNNEL = "splitTunnelEnabled";
     private static final String PREF_PUBLIC_ENDPOINT = "publicEndpointOverride";
+    private static final String PREF_ACTIVATION_TOKEN = "activationToken";
+    private static final String PREF_ACTIVATION_DEVICE = "activationDeviceId";
+    private static final String PREF_ACTIVATION_TIME = "activationTime";
     private static final String[] DOMESTIC_APP_PACKAGES = new String[]{
             "com.tencent.mm",
             "com.tencent.mobileqq",
@@ -86,6 +91,9 @@ public class MainActivity extends Activity {
     private Button connectButton;
     private Button disconnectButton;
     private EditText serverEndpointInput;
+    private EditText activationCodeInput;
+    private TextView activationStatus;
+    private Button activationButton;
     private CheckBox splitTunnelCheck;
 
     private String statusApiUrl = "http://10.77.0.1:8787/status";
@@ -97,11 +105,13 @@ public class MainActivity extends Activity {
     private String profileName = "dualnet-client-android";
     private String profileAccount = "android-user";
     private String localDeviceName = "Android";
+    private String localDeviceId = "";
     private String localTunnelAddress = "";
     private String routeModeText = "仅设备互联";
     private boolean splitTunnelEnabled = true;
     private boolean internetExitEnabled;
     private boolean tunnelUp;
+    private boolean activated;
 
     @Override
     protected void onCreate(Bundle bundle) {
@@ -113,9 +123,11 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         splitTunnelEnabled = prefs.getBoolean(PREF_SPLIT_TUNNEL, true);
         localDeviceName = getDeviceDisplayName();
+        localDeviceId = getStableDeviceId();
         buildUi();
         loadProfile();
         loadConfig();
+        refreshActivationUi();
         setStateCard("未连接", "点击“连接”开始使用", "同一 WiFi 下建议选择“局域网节点”。", MUTED);
     }
 
@@ -158,6 +170,27 @@ public class MainActivity extends Activity {
         statusHint.setPadding(0, dp(8), 0, 0);
         stateCard.addView(statusHint);
         root.addView(stateCard);
+
+        LinearLayout activationCard = card();
+        activationCard.addView(text("设备激活", 18, TEXT, true));
+        activationStatus = text("首次使用需要输入一次性激活码。", 14, MUTED, false);
+        activationStatus.setPadding(0, dp(8), 0, dp(12));
+        activationCard.addView(activationStatus);
+        activationCodeInput = new EditText(this);
+        activationCodeInput.setSingleLine(true);
+        activationCodeInput.setTextSize(14);
+        activationCodeInput.setTextColor(TEXT);
+        activationCodeInput.setHint("输入激活码");
+        activationCodeInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        activationCodeInput.setPadding(dp(12), 0, dp(12), 0);
+        activationCodeInput.setBackground(rounded(Color.rgb(248, 250, 252), LINE, 10));
+        activationCard.addView(activationCodeInput, new LinearLayout.LayoutParams(-1, dp(48)));
+        activationButton = secondary("激活设备");
+        activationButton.setOnClickListener(v -> activateDevice());
+        LinearLayout.LayoutParams activationButtonLp = new LinearLayout.LayoutParams(-1, dp(48));
+        activationButtonLp.setMargins(0, dp(10), 0, 0);
+        activationCard.addView(activationButton, activationButtonLp);
+        root.addView(activationCard);
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
@@ -331,6 +364,26 @@ public class MainActivity extends Activity {
             return model;
         }
         return manufacturer + " " + model;
+    }
+
+    private String getStableDeviceId() {
+        String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+        String seed = (androidId == null || androidId.length() == 0)
+                ? Build.MANUFACTURER + "|" + Build.MODEL + "|" + Build.DEVICE
+                : androidId;
+        return "android-" + sha256(seed);
+    }
+
+    private String sha256(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hash) sb.append(String.format(Locale.ROOT, "%02x", b));
+            return sb.toString();
+        } catch (Exception ex) {
+            return String.valueOf(value.hashCode());
+        }
     }
 
     private String extractInterfaceAddress(String configText) {
@@ -526,8 +579,143 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean isActivated() {
+        String token = prefs.getString(PREF_ACTIVATION_TOKEN, "");
+        String device = prefs.getString(PREF_ACTIVATION_DEVICE, "");
+        return token.length() > 0 && localDeviceId.equals(device);
+    }
+
+    private void refreshActivationUi() {
+        activated = isActivated();
+        if (activationStatus == null) return;
+        if (activated) {
+            activationStatus.setText("已激活：此设备已绑定，以后不需要再次输入激活码。");
+            activationStatus.setTextColor(GREEN);
+            if (activationCodeInput != null) {
+                activationCodeInput.setText("");
+                activationCodeInput.setEnabled(false);
+            }
+            if (activationButton != null) activationButton.setEnabled(false);
+        } else {
+            activationStatus.setText("首次使用需要输入一次性激活码。");
+            activationStatus.setTextColor(MUTED);
+            if (activationCodeInput != null) activationCodeInput.setEnabled(true);
+            if (activationButton != null) activationButton.setEnabled(true);
+        }
+    }
+
+    private void activateDevice() {
+        String code = activationCodeInput == null ? "" : activationCodeInput.getText().toString().trim();
+        if (code.length() == 0) {
+            setStateCard("未激活", "请输入激活码", "每个激活码只能绑定一台设备。", RED);
+            return;
+        }
+        if (activationButton != null) activationButton.setEnabled(false);
+        if (activationStatus != null) {
+            activationStatus.setText("正在联系激活服务器...");
+            activationStatus.setTextColor(BLUE);
+        }
+        log("正在激活设备");
+        new Thread(() -> {
+            try {
+                JSONObject response = claimActivation(code);
+                if (!response.optBoolean("ok", false)) {
+                    throw new IllegalStateException(response.optString("message", "激活失败"));
+                }
+                String token = response.optString("token", "");
+                if (token.length() == 0) throw new IllegalStateException("激活服务器未返回 token");
+                prefs.edit()
+                        .putString(PREF_ACTIVATION_TOKEN, token)
+                        .putString(PREF_ACTIVATION_DEVICE, localDeviceId)
+                        .putString(PREF_ACTIVATION_TIME, response.optString("activatedAt", ""))
+                        .apply();
+                runOnUiThread(() -> {
+                    refreshActivationUi();
+                    setStateCard("已激活", "设备激活成功", "现在可以点击“连接”。", GREEN);
+                    log("设备激活成功");
+                });
+            } catch (Exception ex) {
+                runOnUiThread(() -> {
+                    if (activationButton != null) activationButton.setEnabled(true);
+                    if (activationStatus != null) {
+                        activationStatus.setText("激活失败：" + safeMessage(ex));
+                        activationStatus.setTextColor(RED);
+                    }
+                    setStateCard("激活失败", "无法激活此设备", safeMessage(ex), RED);
+                    log("激活失败: " + safeMessage(ex));
+                });
+            }
+        }).start();
+    }
+
+    private JSONObject claimActivation(String code) throws Exception {
+        Exception last = null;
+        JSONObject payload = new JSONObject();
+        payload.put("code", code);
+        payload.put("deviceId", localDeviceId);
+        payload.put("deviceName", localDeviceName);
+        payload.put("platform", "android");
+        byte[] body = payload.toString().getBytes(StandardCharsets.UTF_8);
+        for (String urlValue : activationUrlCandidates()) {
+            try {
+                log("请求激活接口：" + urlValue);
+                HttpURLConnection conn = (HttpURLConnection) new URL(urlValue).openConnection();
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
+                conn.setRequestMethod("POST");
+                conn.setDoOutput(true);
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                conn.getOutputStream().write(body);
+                int status = conn.getResponseCode();
+                InputStream stream = status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream();
+                String text;
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                    text = reader.lines().collect(Collectors.joining("\n"));
+                }
+                JSONObject response = new JSONObject(text);
+                if (status < 200 || status >= 300) {
+                    throw new IllegalStateException(response.optString("message", "HTTP " + status));
+                }
+                return response;
+            } catch (Exception ex) {
+                last = ex;
+                log("激活接口不可达：" + safeMessage(ex));
+            }
+        }
+        throw last == null ? new IllegalStateException("没有可用的激活接口") : last;
+    }
+
+    private String[] activationUrlCandidates() {
+        String[] endpoints = new String[]{activeEndpoint, publicEndpoint, lanEndpoint};
+        java.util.LinkedHashSet<String> urls = new java.util.LinkedHashSet<>();
+        for (String endpoint : endpoints) {
+            String host = endpointHost(endpoint);
+            if (host.length() > 0) urls.add("http://" + host + ":8787/activate");
+        }
+        if (statusApiUrl.endsWith("/status")) {
+            urls.add(statusApiUrl.substring(0, statusApiUrl.length() - "/status".length()) + "/activate");
+        }
+        return urls.toArray(new String[0]);
+    }
+
+    private String endpointHost(String endpoint) {
+        String value = endpoint == null ? "" : endpoint.trim();
+        if (value.startsWith("http://")) value = value.substring(7);
+        if (value.startsWith("https://")) value = value.substring(8);
+        int slash = value.indexOf('/');
+        if (slash >= 0) value = value.substring(0, slash);
+        int colon = value.lastIndexOf(':');
+        if (colon > 0) value = value.substring(0, colon);
+        return value.trim();
+    }
+
     private void connectTunnel() {
         try {
+            if (!isActivated()) {
+                refreshActivationUi();
+                setStateCard("未激活", "请先激活此设备", "输入一次性激活码后才能连接。", RED);
+                return;
+            }
             if (config == null) {
                 setStateCard("配置错误", "配置未加载", "请重新安装最新版 App。", RED);
                 return;
