@@ -112,6 +112,7 @@ public class MainActivity extends Activity {
     private boolean internetExitEnabled;
     private boolean tunnelUp;
     private boolean activated;
+    private boolean devicesLoaded;
 
     @Override
     protected void onCreate(Bundle bundle) {
@@ -818,11 +819,13 @@ public class MainActivity extends Activity {
             log("尚未连接，跳过设备刷新");
             return;
         }
-        setDevicesMessage("正在刷新", "正在读取服务端设备状态。", BLUE);
+        if (!devicesLoaded) {
+            setDevicesMessage("正在刷新", "正在读取服务端设备状态。", BLUE);
+        }
         log("正在刷新设备列表");
         new Thread(() -> {
             try {
-                String body = fetchStatusBody();
+                String body = fetchStatusBodyWithRetry();
                 runOnUiThread(() -> {
                     setStateCard("已连接", "服务端连通正常", "设备列表已更新。", GREEN);
                     renderDevices(body);
@@ -837,6 +840,10 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> {
                     boolean handshaked = hasLocalHandshakeSafe();
                     if (handshaked) {
+                        if (devicesLoaded) {
+                            log("设备列表本次刷新失败，保留上一次成功结果: " + safeMessage(ex));
+                            return;
+                        }
                         setStateCard("已连接", "VPN 已完成握手", "设备列表接口暂不可达；隧道本身已连接。", GREEN);
                         setDevicesMessage("设备列表暂不可用", "手机已完成 WireGuard 握手，但状态接口不可达：" + safeMessage(ex), BLUE);
                     } else {
@@ -874,7 +881,21 @@ public class MainActivity extends Activity {
         throw last == null ? new IllegalStateException("没有可用的设备接口") : last;
     }
 
+    private String fetchStatusBodyWithRetry() throws Exception {
+        Exception last = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                return fetchStatusBody();
+            } catch (Exception ex) {
+                last = ex;
+                if (attempt < 3) Thread.sleep(1200);
+            }
+        }
+        throw last == null ? new IllegalStateException("status API unavailable") : last;
+    }
+
     private String[] statusUrlCandidates() {
+        if (statusApiUrl != null && statusApiUrl.length() > 0) return new String[]{statusApiUrl};
         String host = "";
         int colon = activeEndpoint.lastIndexOf(':');
         if (colon > 0) host = activeEndpoint.substring(0, colon);
@@ -910,6 +931,7 @@ public class MainActivity extends Activity {
                 JSONObject d = arr.getJSONObject(i);
                 devicesList.addView(deviceRow(d));
             }
+            devicesLoaded = true;
         } catch (Exception ex) {
             setDevicesMessage("设备数据解析失败", safeMessage(ex), RED);
         }
