@@ -1896,6 +1896,7 @@ internal sealed class MainForm : Form
 
     private static (int ExitCode, string Output, string Error) RunProcess(string fileName, string arguments)
     {
+        const int timeoutMs = 120000;
         var psi = new ProcessStartInfo
         {
             FileName = fileName,
@@ -1908,9 +1909,16 @@ internal sealed class MainForm : Form
             CreateNoWindow = true
         };
         using var process = Process.Start(psi) ?? throw new InvalidOperationException($"Unable to start {fileName}");
-        var output = process.StandardOutput.ReadToEnd();
-        var error = process.StandardError.ReadToEnd();
-        process.WaitForExit();
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit(timeoutMs))
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch { }
+            return (-1, "", $"Command timed out after {timeoutMs / 1000} seconds: {Path.GetFileName(fileName)} {arguments}");
+        }
+        var output = outputTask.GetAwaiter().GetResult();
+        var error = errorTask.GetAwaiter().GetResult();
         return (process.ExitCode, output, error);
     }
 
