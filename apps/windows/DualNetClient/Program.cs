@@ -777,15 +777,23 @@ internal sealed class MainForm : Form
 
     private IEnumerable<string> ActivationUrlCandidates()
     {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (Uri.TryCreate(_statusApi.Text.Trim(), UriKind.Absolute, out var statusUri))
+        {
+            var url = new UriBuilder(statusUri) { Path = "activate", Query = "" }.Uri.ToString();
+            if (seen.Add(url)) yield return url;
+        }
+
         var endpoints = new[] { _profile.Endpoint, _profile.LanEndpoint };
         foreach (var endpoint in endpoints)
         {
             var host = EndpointHost(endpoint);
             if (!string.IsNullOrWhiteSpace(host))
-                yield return $"http://{host}:{StatusApiPort}/activate";
+            {
+                var url = $"http://{host}:{StatusApiPort}/activate";
+                if (seen.Add(url)) yield return url;
+            }
         }
-        if (Uri.TryCreate(_statusApi.Text.Trim(), UriKind.Absolute, out var statusUri))
-            yield return new UriBuilder(statusUri) { Path = "activate", Query = "" }.Uri.ToString();
     }
 
     private static string EndpointHost(string endpoint)
@@ -844,19 +852,53 @@ internal sealed class MainForm : Form
 
     private void ConnectClient()
     {
-        SetClientMessage("正在连接", "正在安装并启动连接端", "通常需要几秒钟，请稍候。", Blue);
-        Application.DoEvents();
-        if (!EnsureActivated()) return;
-        if (!ValidateAdminAndWireGuard()) return;
-        if (!File.Exists(_profile.ConfigPath))
+        try
         {
-            MessageBox.Show("找不到连接配置。请打开“高级”页重新选择配置文件。", "无法连接", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
+            if (!ValidateAdminAndWireGuard()) return;
+            if (!File.Exists(_profile.ConfigPath))
+            {
+                MessageBox.Show("找不到连接配置。请打开“高级”页重新选择配置文件。", "无法连接", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!IsActivated())
+            {
+                SetClientMessage("正在验证", "正在连接服务端验证激活码", "公网未开放管理接口时，会先建立隧道再完成激活。", Blue);
+                Application.DoEvents();
+                var activationTunnelState = EnsureClientTunnelRunning();
+                RefreshClientStatus();
+                if (activationTunnelState != "运行中")
+                    throw new InvalidOperationException($"连接端服务未能启动，当前状态：{activationTunnelState}");
+                if (!EnsureActivated())
+                {
+                    UninstallTunnel(_profile.TunnelName);
+                    RefreshClientStatus();
+                    return;
+                }
+            }
+
+            SetClientMessage("正在连接", "正在安装并启动连接端", "通常需要几十秒，请稍候。", Blue);
+            Application.DoEvents();
+            var state = EnsureClientTunnelRunning();
+            RefreshClientStatus();
+            if (state != "运行中")
+                throw new InvalidOperationException($"连接端服务未能启动，当前状态：{state}");
+
+            MessageBox.Show("连接端服务已启动。", "bicarnet", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-        InstallTunnel(_profile.ConfigPath);
-        WaitForServiceState(_profile.TunnelName, "运行中", TimeSpan.FromSeconds(12));
-        RefreshClientStatus();
-        MessageBox.Show("连接端服务已启动。", "bicarnet", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        catch (Exception ex)
+        {
+            SetClientMessage("连接失败", "无法启动连接端", ex.Message, Red);
+            Log("连接失败: " + ex.Message);
+            MessageBox.Show(ex.Message, "bicarnet 连接失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    private string EnsureClientTunnelRunning()
+    {
+        if (GetServiceState(_profile.TunnelName) != "运行中")
+            InstallTunnel(_profile.ConfigPath);
+        return WaitForServiceState(_profile.TunnelName, "运行中", TimeSpan.FromSeconds(90));
     }
 
     private void DisconnectClient()
@@ -871,27 +913,38 @@ internal sealed class MainForm : Form
 
     private void StartServer()
     {
-        SetServerMessage("正在启动", "正在安装并启动服务端", "正在配置防火墙、WireGuard 隧道和设备状态接口。", Blue);
-        Application.DoEvents();
-        if (!ValidateAdminAndWireGuard()) return;
-        if (!File.Exists(_serverConfigPath.Text))
+        try
         {
-            MessageBox.Show("找不到服务端配置。请打开“高级”页选择 dist/windows/server/dualnet-server.conf。", "无法启动服务端", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
+            SetServerMessage("正在启动", "正在安装并启动服务端", "正在配置防火墙、WireGuard 隧道和设备状态接口。", Blue);
+            Application.DoEvents();
+            if (!ValidateAdminAndWireGuard()) return;
+            if (!File.Exists(_serverConfigPath.Text))
+            {
+                MessageBox.Show("找不到服务端配置。请打开“高级”页选择 dist/windows/server/dualnet-server.conf。", "无法启动服务端", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            EnsureFirewallRule("bicarnet WireGuard UDP 51820", "UDP", "51820");
+            EnsureFirewallRule($"bicarnet Status API TCP {StatusApiPort}", "TCP", StatusApiPort.ToString());
+            if (GetServiceState(DefaultServerTunnel) != "运行中")
+            {
+                InstallTunnel(_serverConfigPath.Text);
+                var state = WaitForServiceState(DefaultServerTunnel, "运行中", TimeSpan.FromSeconds(90));
+                if (state != "运行中")
+                    throw new InvalidOperationException($"服务端隧道未能启动，当前状态：{state}");
+            }
+            StartStatusApi();
+            ApplyBlockedPeers();
+            RefreshServerStatus();
+            RefreshDevicesFromLocalServer();
+            if (GetServiceState(DefaultServerTunnel) == "运行中" && _listener is not null)
+                MessageBox.Show("服务端已启动。现在可以让手机或电脑连接，并在“设备”页刷新查看。", "bicarnet 服务端已就绪", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-        EnsureFirewallRule("bicarnet WireGuard UDP 51820", "UDP", "51820");
-        EnsureFirewallRule($"bicarnet Status API TCP {StatusApiPort}", "TCP", StatusApiPort.ToString());
-        if (GetServiceState(DefaultServerTunnel) != "运行中")
+        catch (Exception ex)
         {
-            InstallTunnel(_serverConfigPath.Text);
-            WaitForServiceState(DefaultServerTunnel, "运行中", TimeSpan.FromSeconds(12));
+            SetServerMessage("启动失败", "服务端未启动", ex.Message, Red);
+            Log("服务端启动失败: " + ex.Message);
+            MessageBox.Show(ex.Message, "bicarnet 服务端启动失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
-        StartStatusApi();
-        ApplyBlockedPeers();
-        RefreshServerStatus();
-        RefreshDevicesFromLocalServer();
-        if (GetServiceState(DefaultServerTunnel) == "运行中" && _listener is not null)
-            MessageBox.Show("服务端已启动。现在可以让手机或电脑连接，并在“设备”页刷新查看。", "bicarnet 服务端已就绪", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private void StopServer()
@@ -990,7 +1043,7 @@ internal sealed class MainForm : Form
     {
         try
         {
-            if (!EnsureActivated()) return;
+            if (!EnsureAdminReady()) return;
             var token = LoadLocalActivationToken();
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
             http.DefaultRequestHeaders.Add("X-Bicarnet-Admin-Token", token);
@@ -1050,6 +1103,7 @@ internal sealed class MainForm : Form
     {
         try
         {
+            if (!EnsureAdminReady()) return;
             if (!_adminDevices.TryGetValue(deviceIdHash, out var device)) return;
             var confirm = MessageBox.Show(blocked ? $"确认踢下线并停用 {device.DeviceName}？" : $"确认恢复 {device.DeviceName}？", "bicarnet 管理", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
             if (confirm != DialogResult.OK) return;
@@ -1073,7 +1127,7 @@ internal sealed class MainForm : Form
     {
         try
         {
-            if (!EnsureActivated()) return;
+            if (!EnsureAdminReady()) return;
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
             http.DefaultRequestHeaders.Add("X-Bicarnet-Admin-Token", LoadLocalActivationToken());
             var json = await http.GetStringAsync(AdminUrl("/admin/codes"));
@@ -1123,7 +1177,7 @@ internal sealed class MainForm : Form
     {
         try
         {
-            if (!EnsureActivated()) return;
+            if (!EnsureAdminReady()) return;
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
             http.DefaultRequestHeaders.Add("X-Bicarnet-Admin-Token", LoadLocalActivationToken());
             var body = JsonSerializer.Serialize(new AdminCreateCodesRequest { Count = 1, Role = "client" });
@@ -1149,6 +1203,35 @@ internal sealed class MainForm : Form
         var activation = JsonSerializer.Deserialize<LocalActivation>(File.ReadAllText(path, Encoding.UTF8), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
         if (activation is null || string.IsNullOrWhiteSpace(activation.Token)) throw new InvalidOperationException("管理端激活信息无效。");
         return activation.Token;
+    }
+
+    private bool EnsureAdminReady()
+    {
+        if (!AdminOnly) return EnsureActivated();
+        if (!ValidateAdminAndWireGuard()) return false;
+        if (!File.Exists(_profile.ConfigPath))
+        {
+            MessageBox.Show("找不到管理端连接配置。请打开“高级”页重新选择配置文件。", "无法连接管理端", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+
+        try
+        {
+            SetClientMessage("正在连接", "正在连接管理隧道", "管理接口位于隧道内，需要先连接到服务端。", Blue);
+            Application.DoEvents();
+            var state = EnsureClientTunnelRunning();
+            RefreshClientStatus();
+            if (state != "运行中")
+                throw new InvalidOperationException($"管理隧道未能启动，当前状态：{state}");
+            return EnsureActivated();
+        }
+        catch (Exception ex)
+        {
+            SetClientMessage("连接失败", "无法启动管理隧道", ex.Message, Red);
+            Log("管理端连接失败: " + ex.Message);
+            MessageBox.Show(ex.Message, "bicarnet 管理端连接失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
     }
 
     private string AdminUrl(string path)
@@ -1857,7 +1940,9 @@ internal sealed class MainForm : Form
     {
         var tunnelName = Path.GetFileNameWithoutExtension(configPath);
         if (GetServiceState(tunnelName) != "未安装") UninstallTunnel(tunnelName);
-        RunLogged(ResolveWireGuardTool("wireguard.exe"), $"/installtunnelservice \"{Path.GetFullPath(configPath)}\"");
+        var result = RunLogged(ResolveWireGuardTool("wireguard.exe"), $"/installtunnelservice \"{Path.GetFullPath(configPath)}\"");
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error) ? $"WireGuard 安装隧道失败，退出码 {result.ExitCode}。" : result.Error.Trim());
     }
 
     private void UninstallTunnel(string tunnelName)
@@ -1885,13 +1970,14 @@ internal sealed class MainForm : Form
         RunLogged("powershell.exe", $"-NoProfile -NonInteractive -Command \"New-NetFirewallRule -DisplayName '{displayName}' -Direction Inbound -Action Allow -Protocol {protocol} -LocalPort {port}\"");
     }
 
-    private void RunLogged(string fileName, string arguments)
+    private (int ExitCode, string Output, string Error) RunLogged(string fileName, string arguments)
     {
         Log($"> {Path.GetFileName(fileName)} {arguments}");
         var result = RunProcess(fileName, arguments);
         if (!string.IsNullOrWhiteSpace(result.Output)) Log(result.Output.Trim());
         if (!string.IsNullOrWhiteSpace(result.Error)) Log(result.Error.Trim());
         Log($"ExitCode: {result.ExitCode}");
+        return result;
     }
 
     private static (int ExitCode, string Output, string Error) RunProcess(string fileName, string arguments)
