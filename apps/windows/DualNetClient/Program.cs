@@ -176,6 +176,7 @@ internal sealed class ServerPeerConfig
 {
     public string Name { get; set; } = "";
     public string PublicKey { get; set; } = "";
+    public string PresharedKey { get; set; } = "";
     public string AllowedIps { get; set; } = "";
 }
 
@@ -1694,8 +1695,27 @@ internal sealed class MainForm : Form
     {
         var peer = FindServerPeer(record);
         if (peer is null) return "已恢复，但未找到可恢复的 WireGuard peer。";
-        var result = RunProcess(ResolveWireGuardTool("wg.exe"), $"set {DefaultServerTunnel} peer {peer.PublicKey} allowed-ips {peer.AllowedIps}");
-        return result.ExitCode == 0 ? "已恢复并重新允许连接。" : $"已恢复，WireGuard 恢复失败：{result.Error}{result.Output}";
+        var arguments = $"set {DefaultServerTunnel} peer {peer.PublicKey} allowed-ips {peer.AllowedIps}";
+        string? presharedKeyPath = null;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(peer.PresharedKey))
+            {
+                presharedKeyPath = Path.Combine(Path.GetTempPath(), $"bicarnet-psk-{Guid.NewGuid():N}.key");
+                File.WriteAllText(presharedKeyPath, peer.PresharedKey + Environment.NewLine, new UTF8Encoding(false));
+                arguments = $"set {DefaultServerTunnel} peer {peer.PublicKey} preshared-key \"{presharedKeyPath}\" allowed-ips {peer.AllowedIps}";
+            }
+            var result = RunProcess(ResolveWireGuardTool("wg.exe"), arguments);
+            return result.ExitCode == 0 ? "已恢复并重新允许连接。" : $"已恢复，WireGuard 恢复失败：{result.Error}{result.Output}";
+        }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(presharedKeyPath))
+            {
+                try { File.Delete(presharedKeyPath); }
+                catch { }
+            }
+        }
     }
 
     private ServerPeerConfig? FindServerPeer(ActivationCodeRecord record)
@@ -1897,6 +1917,8 @@ internal sealed class MainForm : Form
             if (current is null) continue;
             if (line.StartsWith("PublicKey", StringComparison.OrdinalIgnoreCase))
                 current.PublicKey = line.Split('=', 2)[1].Trim();
+            else if (line.StartsWith("PresharedKey", StringComparison.OrdinalIgnoreCase))
+                current.PresharedKey = line.Split('=', 2)[1].Trim();
             else if (line.StartsWith("AllowedIPs", StringComparison.OrdinalIgnoreCase))
                 current.AllowedIps = line.Split('=', 2)[1].Trim();
         }
