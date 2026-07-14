@@ -50,8 +50,19 @@ if ($EnableNat) {
   $existing = Get-NetNat -Name "DualNetNat" -ErrorAction SilentlyContinue
   if ($existing) { Remove-NetNat -Name "DualNetNat" -Confirm:$false }
   New-NetNat -Name "DualNetNat" -InternalIPInterfaceAddressPrefix $NatPrefix | Out-Null
+
+  # NAT translates the addresses, but Windows must also forward packets received
+  # from the WireGuard interface to the server's Internet-facing interface.
+  $tunnelInterface = Get-NetIPInterface -InterfaceAlias $tunnelName -AddressFamily IPv4 -ErrorAction Stop
+  Set-NetIPInterface -InterfaceIndex $tunnelInterface.InterfaceIndex -AddressFamily IPv4 -Forwarding Enabled
 }
 
 Write-Host "WireGuard server tunnel installed: $tunnelName"
 Write-Host "UDP firewall rule opened: $Port"
-if ($EnableNat) { Write-Host "NAT enabled for $NatPrefix. A reboot may be required for IP forwarding." }
+if ($EnableNat) {
+  $nat = Get-NetNat -Name "DualNetNat"
+  $forwarding = Get-NetIPInterface -InterfaceAlias $tunnelName -AddressFamily IPv4 |
+    Select-Object InterfaceAlias, InterfaceIndex, Forwarding
+  Write-Host "NAT enabled for $($nat.InternalIPInterfaceAddressPrefix)."
+  Write-Host "WireGuard IPv4 forwarding: $($forwarding.Forwarding) (interface $($forwarding.InterfaceAlias))."
+}
