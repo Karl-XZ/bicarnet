@@ -47,9 +47,14 @@ $ErrorActionPreference = $oldPreference
 
 if ($EnableNat) {
   Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name IPEnableRouter -Value 1
-  $existing = Get-NetNat -Name "DualNetNat" -ErrorAction SilentlyContinue
-  if ($existing) { Remove-NetNat -Name "DualNetNat" -Confirm:$false }
-  New-NetNat -Name "DualNetNat" -InternalIPInterfaceAddressPrefix $NatPrefix | Out-Null
+  try {
+    Get-CimClass -Namespace "root/StandardCimv2" -ClassName "MSFT_NetNat" -ErrorAction Stop | Out-Null
+    $existing = Get-NetNat -Name "DualNetNat" -ErrorAction Stop
+    if ($existing) { Remove-NetNat -Name "DualNetNat" -Confirm:$false -ErrorAction Stop }
+    New-NetNat -Name "DualNetNat" -InternalIPInterfaceAddressPrefix $NatPrefix -ErrorAction Stop | Out-Null
+  } catch {
+    throw "Windows NAT is unavailable on this host: $($_.Exception.Message)"
+  }
 
   # NAT translates the addresses, but Windows must also forward packets received
   # from the WireGuard interface to the server's Internet-facing interface.
@@ -60,7 +65,7 @@ if ($EnableNat) {
 Write-Host "WireGuard server tunnel installed: $tunnelName"
 Write-Host "UDP firewall rule opened: $Port"
 if ($EnableNat) {
-  $nat = Get-NetNat -Name "DualNetNat"
+  $nat = Get-NetNat -Name "DualNetNat" -ErrorAction Stop
   $forwarding = Get-NetIPInterface -InterfaceAlias $tunnelName -AddressFamily IPv4 |
     Select-Object InterfaceAlias, InterfaceIndex, Forwarding
   Write-Host "NAT enabled for $($nat.InternalIPInterfaceAddressPrefix)."

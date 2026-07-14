@@ -23,11 +23,16 @@ if ($service.Status -ne "Running") {
 
 Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name IPEnableRouter -Value 1
 
-$nat = Get-NetNat -Name "DualNetNat" -ErrorAction SilentlyContinue
-if (!$nat) {
-  $nat = New-NetNat -Name "DualNetNat" -InternalIPInterfaceAddressPrefix $NatPrefix
-} elseif ($nat.InternalIPInterfaceAddressPrefix -ne $NatPrefix) {
-  throw "DualNetNat uses $($nat.InternalIPInterfaceAddressPrefix), expected $NatPrefix. Do not replace it automatically."
+try {
+  Get-CimClass -Namespace "root/StandardCimv2" -ClassName "MSFT_NetNat" -ErrorAction Stop | Out-Null
+  $nat = Get-NetNat -Name "DualNetNat" -ErrorAction Stop
+  if (!$nat) {
+    $nat = New-NetNat -Name "DualNetNat" -InternalIPInterfaceAddressPrefix $NatPrefix -ErrorAction Stop
+  } elseif ($nat.InternalIPInterfaceAddressPrefix -ne $NatPrefix) {
+    throw "DualNetNat uses $($nat.InternalIPInterfaceAddressPrefix), expected $NatPrefix. Do not replace it automatically."
+  }
+} catch {
+  throw "Windows NAT is unavailable on this host: $($_.Exception.Message)"
 }
 
 $tunnelInterface = Get-NetIPInterface -InterfaceAlias $TunnelName -AddressFamily IPv4 -ErrorAction Stop
@@ -35,7 +40,7 @@ Set-NetIPInterface -InterfaceIndex $tunnelInterface.InterfaceIndex -AddressFamil
 
 Write-Host "=== bicarnet egress verification ==="
 Get-Service -Name $serviceName | Select-Object Name, Status
-Get-NetNat -Name "DualNetNat" | Select-Object Name, InternalIPInterfaceAddressPrefix, Active
+Get-NetNat -Name "DualNetNat" -ErrorAction Stop | Select-Object Name, InternalIPInterfaceAddressPrefix, Active
 Get-NetIPInterface -InterfaceAlias $TunnelName -AddressFamily IPv4 |
   Select-Object InterfaceAlias, InterfaceIndex, ConnectionState, Forwarding
 Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name IPEnableRouter |
