@@ -35,7 +35,14 @@ try {
   throw "Windows NAT is unavailable on this host: $($_.Exception.Message)"
 }
 
-$tunnelInterface = Get-NetIPInterface -InterfaceAlias $TunnelName -AddressFamily IPv4 -ErrorAction Stop
+$tunnelInterface = $null
+for ($attempt = 1; $attempt -le 30 -and !$tunnelInterface; $attempt++) {
+  $tunnelInterface = Get-NetIPInterface -InterfaceAlias $TunnelName -AddressFamily IPv4 -ErrorAction SilentlyContinue
+  if (!$tunnelInterface) { Start-Sleep -Seconds 2 }
+}
+if (!$tunnelInterface) {
+  throw "WireGuard IPv4 interface '$TunnelName' was not available after 60 seconds."
+}
 Set-NetIPInterface -InterfaceIndex $tunnelInterface.InterfaceIndex -AddressFamily IPv4 -Forwarding Enabled
 
 Write-Host "=== bicarnet egress verification ==="
