@@ -49,7 +49,9 @@ if ($EnableNat) {
   Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name IPEnableRouter -Value 1
   try {
     Get-CimClass -Namespace "root/StandardCimv2" -ClassName "MSFT_NetNat" -ErrorAction Stop | Out-Null
-    $existing = Get-NetNat -Name "DualNetNat" -ErrorAction Stop
+    # A missing named instance is normal on first setup. The CIM class check
+    # above distinguishes that from an unavailable Windows NAT provider.
+    $existing = Get-NetNat -Name "DualNetNat" -ErrorAction SilentlyContinue
     if ($existing) { Remove-NetNat -Name "DualNetNat" -Confirm:$false -ErrorAction Stop }
     New-NetNat -Name "DualNetNat" -InternalIPInterfaceAddressPrefix $NatPrefix -ErrorAction Stop | Out-Null
   } catch {

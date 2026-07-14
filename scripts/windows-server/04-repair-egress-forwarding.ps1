@@ -25,7 +25,9 @@ Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters
 
 try {
   Get-CimClass -Namespace "root/StandardCimv2" -ClassName "MSFT_NetNat" -ErrorAction Stop | Out-Null
-  $nat = Get-NetNat -Name "DualNetNat" -ErrorAction Stop
+  # A missing named instance is normal on first setup. The CIM class check
+  # above distinguishes that from an unavailable Windows NAT provider.
+  $nat = Get-NetNat -Name "DualNetNat" -ErrorAction SilentlyContinue
   if (!$nat) {
     $nat = New-NetNat -Name "DualNetNat" -InternalIPInterfaceAddressPrefix $NatPrefix -ErrorAction Stop
   } elseif ($nat.InternalIPInterfaceAddressPrefix -ne $NatPrefix) {
