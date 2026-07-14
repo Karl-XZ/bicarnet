@@ -31,7 +31,8 @@ if (!$rule) {
   New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -RemoteAddress "10.77.0.0/24" -Profile Any | Out-Null
 } else {
   Set-NetFirewallRule -DisplayName $ruleName -Enabled True -Direction Inbound -Action Allow -Profile Any
-  Set-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule -RemoteAddress "10.77.0.0/24"
+  $addressFilter = Get-NetFirewallAddressFilter -AssociatedNetFirewallRule $rule
+  Set-NetFirewallAddressFilter -InputObject $addressFilter -RemoteAddress "10.77.0.0/24"
 }
 
 $action = New-ScheduledTaskAction -Execute $ServerAppPath -WorkingDirectory (Split-Path -Parent $ServerAppPath)
