@@ -16,7 +16,7 @@ function Assert-Admin {
 function Get-ConfigValue {
   param([string[]]$Lines, [string]$Name, [int]$StartIndex = 0)
   for ($index = $StartIndex; $index -lt $Lines.Count; $index++) {
-    if ($Lines[$index] -match "^$([regex]::Escape($Name))\\s*=\\s*(.+)$") {
+    if ($Lines[$index] -match "^$([regex]::Escape($Name))\s*=\s*(.+)$") {
       return $Matches[1].Trim()
     }
   }
