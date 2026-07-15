@@ -48,13 +48,35 @@ sed -i \
 wg-quick down bicarnet
 wg-quick up bicarnet
 
+# wg-quick resolves the DDNS endpoint while the old resolver may still have a
+# stale router-cache result. Refresh it synchronously before validating traffic;
+# the installed timer remains responsible for future IP changes.
+ddns_refresh="/usr/local/sbin/bicarnet-ddns-refresh"
+if [[ ! -x "$ddns_refresh" ]]; then
+  echo "DDNS refresh helper not installed: $ddns_refresh"
+  exit 1
+fi
+"$ddns_refresh"
+
+status_ready="false"
+for _ in {1..10}; do
+  if curl -4 -fsS --max-time 4 http://10.77.0.1:8787/status >/dev/null; then
+    status_ready="true"
+    break
+  fi
+  sleep 2
+done
+if [[ "$status_ready" != "true" ]]; then
+  echo "Tunnel status API did not become reachable after DDNS refresh."
+  exit 1
+fi
+
 status_code="$(curl -4 -sS --max-time 15 --connect-timeout 8 -o /dev/null -w '%{http_code}' https://www.google.com/generate_204)"
 if [[ "$status_code" != "204" ]]; then
   echo "Google validation failed: HTTP $status_code"
   exit 1
 fi
 
-curl -4 -fsS --max-time 8 http://10.77.0.1:8787/status >/dev/null
 rm -f "$MARKER"
 kill "$rollback_pid" 2>/dev/null || true
 
