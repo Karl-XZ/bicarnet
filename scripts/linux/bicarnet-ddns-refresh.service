@@ -5,4 +5,5 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+TimeoutStartSec=20s
 ExecStart=/usr/local/sbin/bicarnet-ddns-refresh bicarnet jl13dax7yxjbhd80.myfritz.net 51820
