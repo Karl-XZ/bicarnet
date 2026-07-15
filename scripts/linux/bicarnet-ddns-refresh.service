@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh bicarnet WireGuard endpoint from DDNS
+After=network-online.target wg-quick@bicarnet.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/bicarnet-ddns-refresh bicarnet jl13dax7yxjbhd80.myfritz.net 51820
