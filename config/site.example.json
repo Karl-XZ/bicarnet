@@ -6,7 +6,7 @@
     "listenPort": 51820,
     "statusApiPort": 8787,
     "tunnelAddress": "10.77.0.1/24",
-    "dns": "1.1.1.1",
+    "dns": "10.77.0.1",
     "allowClientToClient": true,
     "enableServerAsInternetExit": true
   },
@@ -15,7 +15,7 @@
       "name": "domestic-linux",
       "account": "domestic-server",
       "address": "10.77.0.2/32",
-      "allowedIps": "10.77.0.0/24",
+      "allowedIps": "0.0.0.0/0",
       "persistentKeepalive": 25
     },
     {
