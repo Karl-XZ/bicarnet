@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically verify bicarnet full-tunnel policy routing
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=60s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

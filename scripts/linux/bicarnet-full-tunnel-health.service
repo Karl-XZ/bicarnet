@@ -1,0 +1,9 @@
+[Unit]
+Description=Verify bicarnet full-tunnel policy routing
+After=network-online.target wg-quick@bicarnet.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=45s
+ExecStart=/usr/local/sbin/bicarnet-full-tunnel-health bicarnet
